@@ -1,18 +1,30 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, ImportError};
-use crate::semantics::{check_hash, AlphaVar, Cache, ImportLocation, VarEnv};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::semantics::Cache;
+use crate::semantics::{check_hash, AlphaVar, ImportLocation, VarEnv};
 use crate::syntax::{Hash, Label, V};
 use crate::{Ctxt, ImportId, ImportResultId, Typed};
 
 /// Trait for custom import fetching. Implement this to resolve imports
 /// from sources other than the filesystem/HTTP (e.g. in-memory, virtual FS).
 ///
-/// Receives the full `ImportLocation` so you can match on local paths,
-/// remote URLs, env vars, etc. Return `None` to fall back to the default.
+/// Receives the full `ImportLocation` for each import. Return `None`
+/// from any method to fall back to the default behavior.
 pub trait ImportFetcher {
-    /// Fetch Dhall source code for the given import location.
-    /// Return `None` to fall back to the default fetcher.
+    /// Resolve an import path relative to a base location.
+    /// Return `None` to use default path resolution (filesystem-based).
+    fn chain(
+        &self,
+        _base: &ImportLocation,
+        _import: &crate::semantics::Import,
+    ) -> Option<Result<ImportLocation, Error>> {
+        None
+    }
+
+    /// Fetch content for a resolved location.
+    /// Return `None` to use default I/O (filesystem/HTTP).
     fn fetch(&self, location: &ImportLocation) -> Option<Result<String, Error>>;
 }
 
@@ -27,6 +39,7 @@ pub type CyclesStack = Vec<ImportLocation>;
 /// Environment for resolving imports
 pub struct ImportEnv<'cx> {
     cx: Ctxt<'cx>,
+    #[cfg(not(target_arch = "wasm32"))]
     disk_cache: Option<Cache>,
     mem_cache: HashMap<ImportLocation, ImportResultId<'cx>>,
     stack: CyclesStack,
@@ -81,6 +94,7 @@ impl<'cx> ImportEnv<'cx> {
     pub fn new(cx: Ctxt<'cx>) -> Self {
         ImportEnv {
             cx,
+            #[cfg(not(target_arch = "wasm32"))]
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
@@ -91,6 +105,7 @@ impl<'cx> ImportEnv<'cx> {
     pub fn with_fetcher(cx: Ctxt<'cx>, fetcher: Box<dyn ImportFetcher>) -> Self {
         ImportEnv {
             cx,
+            #[cfg(not(target_arch = "wasm32"))]
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
@@ -117,9 +132,14 @@ impl<'cx> ImportEnv<'cx> {
         &self,
         hash: &Option<Hash>,
     ) -> Option<Typed<'cx>> {
-        let hash = hash.as_ref()?;
-        let expr = self.disk_cache.as_ref()?.get(self.cx(), hash).ok()?;
-        Some(expr)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let hash = hash.as_ref()?;
+            let expr = self.disk_cache.as_ref()?.get(self.cx(), hash).ok()?;
+            return Some(expr);
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = hash; None }
     }
 
     pub fn check_hash(
@@ -143,12 +163,15 @@ impl<'cx> ImportEnv<'cx> {
         hash: &Option<Hash>,
         result: ImportResultId<'cx>,
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(disk_cache) = self.disk_cache.as_ref() {
             if let Some(hash) = hash {
                 let expr = &self.cx()[result];
                 let _ = disk_cache.insert(self.cx(), hash, expr);
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (hash, result); }
     }
 
     pub fn with_cycle_detection(

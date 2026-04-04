@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Error as IOError;
 
 use crate::semantics::resolve::{CyclesStack, ImportLocation};
@@ -16,12 +17,14 @@ pub struct Error {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    #[cfg(not(target_arch = "wasm32"))]
     IO(IOError),
     Parse(ParseError),
     Decode(DecodeError),
     Encode(EncodeError),
     Resolve(ImportError),
     Typecheck(TypeError),
+    #[cfg(not(target_arch = "wasm32"))]
     Cache(CacheError),
 }
 
@@ -59,6 +62,7 @@ pub enum TypeMessage {
     Custom(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub enum CacheError {
     MissingConfiguration,
@@ -107,12 +111,14 @@ impl std::error::Error for EncodeError {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match &self.kind {
+            #[cfg(not(target_arch = "wasm32"))]
             ErrorKind::IO(err) => write!(f, "{}", err),
             ErrorKind::Parse(err) => write!(f, "{}", err),
             ErrorKind::Decode(err) => write!(f, "{:?}", err),
             ErrorKind::Encode(err) => write!(f, "{:?}", err),
             ErrorKind::Resolve(err) => write!(f, "{:?}", err),
             ErrorKind::Typecheck(err) => write!(f, "{}", err),
+            #[cfg(not(target_arch = "wasm32"))]
             ErrorKind::Cache(err) => write!(f, "{:?}", err),
         }
     }
@@ -124,6 +130,7 @@ impl From<ErrorKind> for Error {
         Error::new(kind)
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl From<IOError> for Error {
     fn from(err: IOError) -> Error {
         ErrorKind::IO(err).into()
@@ -159,6 +166,7 @@ impl From<TypeError> for Error {
         ErrorKind::Typecheck(err).into()
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl From<CacheError> for Error {
     fn from(err: CacheError) -> Error {
         ErrorKind::Cache(err).into()

@@ -21,7 +21,9 @@ pub mod semantics;
 pub mod syntax;
 pub mod utils;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use url::Url;
 
 use crate::error::{Error, TypeError};
@@ -68,15 +70,18 @@ impl Parsed {
         Parsed(e, ImportLocation::dhall_code_without_imports())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn parse_file(f: &Path) -> Result<Parsed, Error> {
         parse::parse_file(f)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn parse_remote(url: Url) -> Result<Parsed, Error> {
         parse::parse_remote(url)
     }
     pub fn parse_str(s: &str) -> Result<Parsed, Error> {
         parse::parse_str(s)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn parse_binary_file(f: &Path) -> Result<Parsed, Error> {
         parse::parse_binary_file(f)
     }
