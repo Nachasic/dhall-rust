@@ -12,6 +12,14 @@ pub fn apply_any<'cx>(f: &Nir<'cx>, a: Nir<'cx>) -> NirKind<'cx> {
         NirKind::UnionConstructor(l, kts) => {
             NirKind::UnionLit(l.clone(), a, kts.clone())
         }
+        NirKind::CustomBuiltin(cx, id, args) => {
+            let mut new_args = args.clone();
+            new_args.push(a);
+            match cx.call_custom_builtin(*id, &new_args) {
+                Some(result) => result.kind().clone(),
+                None => NirKind::CustomBuiltin(*cx, *id, new_args),
+            }
+        }
         _ => NirKind::Op(OpKind::App(f.clone(), a)),
     }
 }

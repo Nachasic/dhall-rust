@@ -2,20 +2,44 @@ use elsa::vec::FrozenVec;
 use once_cell::sync::OnceCell;
 use std::marker::PhantomData;
 use std::ops::{Deref, Index};
+use std::sync::Arc;
 
-use crate::semantics::{Import, ImportLocation, ImportNode};
+use crate::semantics::{Import, ImportLocation, ImportNode, Nir};
 use crate::syntax::Span;
 use crate::Typed;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 // Ctxt
 
+/// A registered custom builtin: name + handler.
+#[derive(Clone)]
+pub struct CustomBuiltinEntry {
+    pub name: String,
+    pub handler: Arc<dyn for<'cx> CustomBuiltinHandler<'cx>>,
+}
+
+/// Trait for custom builtin dispatch.
+pub trait CustomBuiltinHandler<'cx> {
+    fn call(&self, args: &[Nir<'cx>], cx: Ctxt<'cx>) -> Option<Nir<'cx>>;
+}
+
 /// Implementation detail. Made public for the `Index` instances.
-#[derive(Default)]
 pub struct CtxtS<'cx> {
     imports: FrozenVec<Box<StoredImport<'cx>>>,
     import_alternatives: FrozenVec<Box<StoredImportAlternative<'cx>>>,
     import_results: FrozenVec<Box<StoredImportResult<'cx>>>,
+    custom_builtins: Vec<CustomBuiltinEntry>,
+}
+
+impl<'cx> Default for CtxtS<'cx> {
+    fn default() -> Self {
+        CtxtS {
+            imports: FrozenVec::new(),
+            import_alternatives: FrozenVec::new(),
+            import_results: FrozenVec::new(),
+            custom_builtins: Vec::new(),
+        }
+    }
 }
 
 /// Context for the dhall compiler. Stores various global maps.
@@ -28,6 +52,30 @@ impl Ctxt<'_> {
         let cx = CtxtS::default();
         let cx = Ctxt(&cx);
         f(cx)
+    }
+
+    pub fn with_new_custom<T>(
+        builtins: Vec<CustomBuiltinEntry>,
+        f: impl for<'cx> FnOnce(Ctxt<'cx>) -> T,
+    ) -> T {
+        let mut cx = CtxtS::default();
+        cx.custom_builtins = builtins;
+        let cx = Ctxt(&cx);
+        f(cx)
+    }
+}
+
+impl<'cx> Ctxt<'cx> {
+    pub fn lookup_custom_builtin(&self, name: &str) -> Option<usize> {
+        self.0.custom_builtins.iter().position(|b| b.name == name)
+    }
+
+    pub fn call_custom_builtin(&self, id: usize, args: &[Nir<'cx>]) -> Option<Nir<'cx>> {
+        self.0.custom_builtins[id].handler.call(args, *self)
+    }
+
+    pub fn custom_builtin_name(&self, id: usize) -> &str {
+        &self.0.custom_builtins[id].name
     }
 }
 impl<'cx> Deref for Ctxt<'cx> {
@@ -54,6 +102,12 @@ impl<'cx> std::fmt::Debug for Ctxt<'cx> {
         Ok(())
     }
 }
+
+/// All Ctxt values within a session point to the same arena.
+impl<'cx> PartialEq for Ctxt<'cx> {
+    fn eq(&self, _other: &Self) -> bool { true }
+}
+impl<'cx> Eq for Ctxt<'cx> {}
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 // Imports

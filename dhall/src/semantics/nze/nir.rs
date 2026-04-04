@@ -91,6 +91,9 @@ pub enum NirKind<'cx> {
     /// Invariant: evaluation must not be able to progress with `normalize_operation`.
     /// This is used when an operation couldn't proceed further, for example because of variables.
     Op(OpKind<Nir<'cx>>),
+    /// A custom builtin that hasn't fully reduced yet.
+    /// Holds the Ctxt (for callback dispatch), builtin ID, and accumulated args.
+    CustomBuiltin(Ctxt<'cx>, usize, Vec<Nir<'cx>>),
 }
 
 impl<'cx> Nir<'cx> {
@@ -179,8 +182,19 @@ impl<'cx> Nir<'cx> {
         let hir = match self.kind() {
             NirKind::Var(v) => HirKind::Var(venv.lookup(*v)),
             NirKind::AppliedBuiltin(closure) => closure.to_hirkind(venv),
+            NirKind::CustomBuiltin(cx, id, args) => {
+                // Round-trip as a variable application: customName arg1 arg2 ...
+                let name = cx.custom_builtin_name(*id);
+                let base = ExprKind::Var(crate::syntax::V(name.into(), 0));
+                HirKind::Expr(args.iter().fold(base, |acc, v| {
+                    ExprKind::Op(OpKind::App(
+                        Hir::new(HirKind::Expr(acc), Span::Artificial),
+                        v.to_hir(venv),
+                    ))
+                }))
+            }
             self_kind => HirKind::Expr(match self_kind {
-                NirKind::Var(..) | NirKind::AppliedBuiltin(..) => {
+                NirKind::Var(..) | NirKind::AppliedBuiltin(..) | NirKind::CustomBuiltin(..) => {
                     unreachable!()
                 }
                 NirKind::LamClosure {
