@@ -87,7 +87,7 @@ impl<R: resolve::ImportResolver> Engine<R> {
             for b in &self.builtins {
                 name_env.insert_mut(&Label::from(b.name.as_str()));
             }
-            let hir = expr_to_hir(&expr, &mut name_env);
+            let hir = dhall::expr_to_hir(&expr, &mut name_env);
 
             // Build NzEnv with CustomBuiltin values at matching indices.
             let mut nz_env = dhall::semantics::NzEnv::new(cx);
@@ -106,31 +106,4 @@ impl<R: resolve::ImportResolver> Engine<R> {
     fn run_pipeline<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<Nir<'cx>, dhall::error::Error> {
         Ok(self.resolver.resolve(cx, p)?.typecheck(cx)?.normalize(cx).as_nir().clone())
     }
-}
-
-/// Convert an Expr to a Hir with proper variable resolution.
-fn expr_to_hir<'cx>(
-    expr: &dhall::syntax::Expr,
-    env: &mut dhall::semantics::NameEnv,
-) -> dhall::semantics::Hir<'cx> {
-    use dhall::semantics::{Hir, HirKind};
-    use dhall::syntax::ExprKind;
-
-    let kind = match expr.kind() {
-        ExprKind::Var(v) => match env.unlabel_var(v) {
-            Some(alpha) => HirKind::Var(alpha),
-            None => HirKind::MissingVar(v.clone()),
-        },
-        ExprKind::Builtin(b) => HirKind::Expr(ExprKind::Builtin(*b)),
-        other => {
-            let mapped = other.map_ref_maybe_binder(|l, sub| {
-                if let Some(l) = l { env.insert_mut(l); }
-                let hir = expr_to_hir(sub, env);
-                if l.is_some() { env.remove_mut(); }
-                hir
-            });
-            HirKind::Expr(mapped)
-        }
-    };
-    Hir::new(kind, expr.span())
 }
