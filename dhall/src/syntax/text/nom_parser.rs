@@ -44,11 +44,20 @@ fn mkexpr(kind: UnspannedExpr) -> Expr {
 
 // ── 1. Whitespace and comments ───────────────────────────────────────
 
-/// Skip whitespace and line/block comments.
+/// Skip whitespace and line comments (-- to end of line).
 fn ws(input: &str) -> ParseResult<()> {
-    // Simplified: only handles whitespace, not Dhall comments yet.
-    // TODO: line comments (-- ...) and block comments ({- ... -})
-    value((), multispace0)(input)
+    let mut rest = input;
+    loop {
+        let (r, _) = multispace0(rest)?;
+        rest = r;
+        if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("--")(rest) {
+            let (r, _) = take_while(|c: char| c != '\n')(r)?;
+            rest = r;
+        } else {
+            break;
+        }
+    }
+    Ok((rest, ()))
 }
 
 /// Wrap a parser to consume trailing whitespace.
@@ -486,5 +495,17 @@ mod tests {
         let e = parse_expr("let x = 1 in let y = 2 in x + y").unwrap();
         let s = e.to_string();
         assert!(s.contains("let") && s.contains("x") && s.contains("y"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_line_comment() {
+        let e = parse_expr("1 -- this is a comment\n+ 2").unwrap();
+        assert_eq!(e.to_string(), "1 + 2");
+    }
+
+    #[test]
+    fn test_line_comment_at_end() {
+        let e = parse_expr("42 -- trailing comment").unwrap();
+        assert_eq!(e.to_string(), "42");
     }
 }
