@@ -33,6 +33,7 @@ pest = "2.1"
 pest_consume = "1.1"
 sha2 = "0.10.2"
 url = "2.1"
+nom = "7"
 
 # Reqwest needs proper async support to work on wasm. So no remote imports on
 # wasm for now.
