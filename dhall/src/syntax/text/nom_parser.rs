@@ -106,17 +106,168 @@ fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
     ))(input)
 }
 
-/// Double-quoted string literal (simplified — no interpolation yet).
-fn double_quote_literal(input: &str) -> ParseResult<String> {
-    // TODO: escape sequences, interpolation
+/// Double-quoted string escape sequence.
+fn double_quote_escaped(input: &str) -> ParseResult<String> {
+    preceded(char('\\'), alt((
+        value("\"".to_owned(), char('"')),
+        value("$".to_owned(), char('$')),
+        value("\\".to_owned(), char('\\')),
+        value("/".to_owned(), char('/')),
+        value("\u{0008}".to_owned(), char('b')),
+        value("\u{000C}".to_owned(), char('f')),
+        value("\n".to_owned(), char('n')),
+        value("\r".to_owned(), char('r')),
+        value("\t".to_owned(), char('t')),
+        // Unicode escape: \uXXXX or \u{XXXXX}
+        preceded(char('u'), alt((
+            // \u{XXXXX}
+            map_res(
+                delimited(char('{'), take_while1(|c: char| c.is_ascii_hexdigit()), char('}')),
+                |s: &str| u32::from_str_radix(s, 16)
+                    .map_err(|e| format!("{}", e))
+                    .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
+                    .map(|c| c.to_string()),
+            ),
+            // \uXXXX (exactly 4 hex digits)
+            map_res(
+                recognize(tuple((
+                    one_of("0123456789abcdefABCDEF"),
+                    one_of("0123456789abcdefABCDEF"),
+                    one_of("0123456789abcdefABCDEF"),
+                    one_of("0123456789abcdefABCDEF"),
+                ))),
+                |s: &str| u32::from_str_radix(s, 16)
+                    .map_err(|e| format!("{}", e))
+                    .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
+                    .map(|c| c.to_string()),
+            ),
+        ))),
+    )))(input)
+}
+
+/// A chunk of a double-quoted string: text, escape, or interpolation.
+fn double_quote_chunk(input: &str) -> ParseResult<InterpolatedTextContents<Expr>> {
+    alt((
+        // Interpolation: ${expr}
+        map(
+            delimited(tag("${"), expression, char('}')),
+            InterpolatedTextContents::Expr,
+        ),
+        // Escape sequence
+        map(double_quote_escaped, InterpolatedTextContents::Text),
+        // Plain text (no ", \, or ${ )
+        map(
+            take_while1(|c: char| c != '"' && c != '\\' && c != '$'),
+            |s: &str| InterpolatedTextContents::Text(s.to_owned()),
+        ),
+        // A lone $ that isn't followed by {
+        map(char('$'), |_| InterpolatedTextContents::Text("$".to_owned())),
+    ))(input)
+}
+
+/// Double-quoted string literal with escapes and interpolation.
+fn double_quote_literal(input: &str) -> ParseResult<InterpolatedText<Expr>> {
     delimited(
         char('"'),
-        map(
-            take_while(|c: char| c != '"' && c != '\\'),
-            |s: &str| s.to_owned(),
-        ),
+        map(many0(double_quote_chunk), |chunks| chunks.into_iter().collect()),
         char('"'),
     )(input)
+}
+
+/// A chunk of a single-quoted (multi-line) string.
+fn single_quote_chunk(input: &str) -> ParseResult<InterpolatedTextContents<Expr>> {
+    alt((
+        // Escaped sequences specific to multi-line strings
+        value(InterpolatedTextContents::Text("''".to_owned()), tag("'''")),
+        value(InterpolatedTextContents::Text("${".to_owned()), tag("''${")),
+        // Interpolation
+        map(
+            delimited(tag("${"), expression, char('}')),
+            InterpolatedTextContents::Expr,
+        ),
+        // Plain text: anything that isn't '' or ${
+        map(
+            take_while1(|c: char| c != '\'' && c != '$'),
+            |s: &str| InterpolatedTextContents::Text(s.to_owned()),
+        ),
+        // A lone ' that isn't followed by another '
+        map(
+            terminated(char('\''), nom::combinator::not(char('\''))),
+            |_| InterpolatedTextContents::Text("'".to_owned()),
+        ),
+        // A lone $ that isn't followed by {
+        map(
+            terminated(char('$'), nom::combinator::not(char('{'))),
+            |_| InterpolatedTextContents::Text("$".to_owned()),
+        ),
+    ))(input)
+}
+
+/// Multi-line (single-quoted) string literal with indent stripping.
+fn single_quote_literal(input: &str) -> ParseResult<InterpolatedText<Expr>> {
+    let (rest, _) = tag("''")(input)?;
+    // Must be followed by newline (the opening '' must be on its own line-end)
+    let (rest, _) = alt((tag("\r\n"), tag("\n")))(rest)?;
+    let (rest, chunks) = many0(single_quote_chunk)(rest)?;
+    let (rest, _) = tag("''")(rest)?;
+
+    // Build lines by splitting on newlines within Text chunks.
+    let mut lines: Vec<Vec<InterpolatedTextContents<Expr>>> = vec![vec![]];
+    for chunk in chunks {
+        match chunk {
+            InterpolatedTextContents::Text(ref s) => {
+                // Split text on newlines to form lines.
+                let mut parts = s.split('\n');
+                if let Some(first) = parts.next() {
+                    if !first.is_empty() {
+                        lines.last_mut().unwrap().push(
+                            InterpolatedTextContents::Text(first.to_owned()),
+                        );
+                    }
+                    for part in parts {
+                        lines.push(vec![]);
+                        if !part.is_empty() {
+                            lines.last_mut().unwrap().push(
+                                InterpolatedTextContents::Text(part.to_owned()),
+                            );
+                        }
+                    }
+                }
+            }
+            expr => lines.last_mut().unwrap().push(expr),
+        }
+    }
+
+    // Compute minimum indent from non-empty lines.
+    let min_indent = lines.iter().filter_map(|line| {
+        match line.first() {
+            Some(InterpolatedTextContents::Text(s)) if !s.is_empty() || line.len() > 1 => {
+                Some(s.len() - s.trim_start_matches(|c: char| c == ' ' || c == '\t').len())
+            }
+            Some(InterpolatedTextContents::Expr(_)) => Some(0),
+            _ => None, // empty line, skip
+        }
+    }).min().unwrap_or(0);
+
+    // Strip indent and reassemble.
+    let result: InterpolatedText<Expr> = itertools::Itertools::intersperse(
+        lines.into_iter().map(|mut line| {
+            // Strip indent from the first text chunk of each line.
+            if min_indent > 0 {
+                if let Some(InterpolatedTextContents::Text(s)) = line.first_mut() {
+                    if s.len() >= min_indent {
+                        *s = s[min_indent..].to_owned();
+                    }
+                }
+            }
+            line.into_iter().collect::<InterpolatedText<Expr>>()
+        }),
+        InterpolatedText::from("\n".to_owned()),
+    )
+    .flat_map(InterpolatedText::into_iter)
+    .collect();
+
+    Ok((rest, result))
 }
 
 // ── 3. Labels and variables ──────────────────────────────────────────
@@ -214,9 +365,8 @@ fn atom(input: &str) -> ParseResult<Expr> {
         map(integer_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Integer(n)))),
         map(natural_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Natural(n)))),
         // Text literal
-        map(double_quote_literal, |s| {
-            mkexpr(ExprKind::TextLit(InterpolatedText::from(s)))
-        }),
+        map(double_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
+        map(single_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
         // Record literal/type: { ... }
         record_literal_or_type,
         // List literal: [ ... ]
@@ -507,5 +657,88 @@ mod tests {
     fn test_line_comment_at_end() {
         let e = parse_expr("42 -- trailing comment").unwrap();
         assert_eq!(e.to_string(), "42");
+    }
+
+    // ── String tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_string_escape_sequences() {
+        let e = parse_expr(r#""\n\t\\\"\/""#).unwrap();
+        // The printer re-escapes, so we check the AST round-trips.
+        let s = e.to_string();
+        assert!(s.contains("\\n") && s.contains("\\t"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_string_unicode_escape() {
+        let e = parse_expr(r#""\u0041""#).unwrap();
+        // \u0041 = 'A'
+        assert_eq!(e.to_string(), "\"A\"");
+    }
+
+    #[test]
+    fn test_string_unicode_escape_braces() {
+        let e = parse_expr(r#""\u{1F600}""#).unwrap();
+        // \u{1F600} = 😀
+        assert_eq!(e.to_string(), "\"😀\"");
+    }
+
+    #[test]
+    fn test_string_interpolation() {
+        let e = parse_expr(r#""hello ${"world"}""#).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("hello") && s.contains("world"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_string_interpolation_expr() {
+        let e = parse_expr(r#""value: ${Natural/show 42}""#).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("Natural/show") && s.contains("42"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_string_dollar_not_interpolation() {
+        let e = parse_expr(r#""costs $5""#).unwrap();
+        let s = e.to_string();
+        // The printer escapes $ as \u0024 to avoid interpolation ambiguity.
+        assert!(s.contains("costs") && s.contains("5"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_multiline_string_basic() {
+        // Two-line string with indent stripping.
+        let input = "''\n  hello\n  world\n  ''";
+        let e = parse_expr(input).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("hello") && s.contains("world"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_multiline_string_indent_stripping() {
+        // 4-space indent on content, 4-space indent on closing ''.
+        // Should strip 4 spaces.
+        let input = "''\n    line1\n    line2\n    ''";
+        let e = parse_expr(input).unwrap();
+        let s = e.to_string();
+        // After stripping, should be "line1\nline2\n"
+        assert!(s.contains("line1"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_multiline_string_escaped_quotes() {
+        // ''' inside a multi-line string produces ''
+        let input = "''\n  '''quoted'''\n  ''";
+        let e = parse_expr(input).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("''"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_multiline_string_interpolation() {
+        let input = "''\n  hello ${\"world\"}\n  ''";
+        let e = parse_expr(input).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("hello") && s.contains("world"), "got: {}", s);
     }
 }
