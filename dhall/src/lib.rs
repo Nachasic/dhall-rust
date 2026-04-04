@@ -106,6 +106,35 @@ impl Parsed {
     }
 }
 
+/// Convert an `Expr` to a `Hir`, resolving variables against the given `NameEnv`.
+/// Variables not found in the environment become `MissingVar` (which will
+/// panic during normalization — ensure all free variables are accounted for).
+/// This does not handle imports; use on import-free expressions only.
+pub fn expr_to_hir<'cx>(
+    expr: &Expr,
+    env: &mut semantics::NameEnv,
+) -> semantics::Hir<'cx> {
+    use semantics::{Hir, HirKind};
+
+    let kind = match expr.kind() {
+        syntax::ExprKind::Var(v) => match env.unlabel_var(v) {
+            Some(alpha) => HirKind::Var(alpha),
+            None => HirKind::MissingVar(v.clone()),
+        },
+        syntax::ExprKind::Builtin(b) => HirKind::Expr(syntax::ExprKind::Builtin(*b)),
+        other => {
+            let mapped = other.map_ref_maybe_binder(|binder, sub| {
+                if let Some(label) = binder { env.insert_mut(label); }
+                let hir = expr_to_hir(sub, env);
+                if binder.is_some() { env.remove_mut(); }
+                hir
+            });
+            HirKind::Expr(mapped)
+        }
+    };
+    Hir::new(kind, expr.span())
+}
+
 impl<'cx> Resolved<'cx> {
     pub fn typecheck(&self, cx: Ctxt<'cx>) -> Result<Typed<'cx>, TypeError> {
         Ok(Typed::from_tir(typecheck(cx, &self.0)?))
