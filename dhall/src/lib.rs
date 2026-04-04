@@ -88,6 +88,15 @@ impl Parsed {
     pub fn resolve<'cx>(self, cx: Ctxt<'cx>) -> Result<Resolved<'cx>, Error> {
         resolve::resolve(cx, self)
     }
+
+    pub fn resolve_with_fetcher<'cx>(
+        self,
+        cx: Ctxt<'cx>,
+        fetcher: Box<dyn semantics::ImportFetcher>,
+    ) -> Result<Resolved<'cx>, Error> {
+        resolve::resolve_with_fetcher(cx, self, fetcher)
+    }
+
     pub fn skip_resolve<'cx>(
         self,
         cx: Ctxt<'cx>,

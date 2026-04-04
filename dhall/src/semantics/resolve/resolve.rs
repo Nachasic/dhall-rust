@@ -9,7 +9,7 @@ use crate::builtins::Builtin;
 use crate::error::ErrorBuilder;
 use crate::error::{Error, ImportError};
 use crate::operations::{BinOp, OpKind};
-use crate::semantics::{mkerr, Hir, HirKind, ImportEnv, NameEnv, Type};
+use crate::semantics::{mkerr, Hir, HirKind, ImportEnv, ImportFetcher, NameEnv, Type};
 use crate::syntax;
 use crate::syntax::{
     Expr, ExprKind, FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Span,
@@ -25,7 +25,7 @@ pub type Import = syntax::Import<()>;
 
 /// The location of some data, usually some dhall code.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ImportLocationKind {
+pub enum ImportLocationKind {
     /// Local file
     Local(PathBuf),
     /// Remote file
@@ -34,7 +34,7 @@ enum ImportLocationKind {
     Env(String),
     /// Data without a location; chaining will start from current directory.
     Missing,
-    /// Token to signal that thi sfile should contain no imports.
+    /// Token to signal that this file should contain no imports.
     NoImport,
 }
 
@@ -43,6 +43,11 @@ enum ImportLocationKind {
 pub struct ImportLocation {
     kind: ImportLocationKind,
     mode: ImportMode,
+}
+
+impl ImportLocation {
+    pub fn kind(&self) -> &ImportLocationKind { &self.kind }
+    pub fn mode(&self) -> ImportMode { self.mode }
 }
 
 impl ImportLocationKind {
@@ -255,12 +260,46 @@ impl ImportLocation {
         span: Span,
     ) -> Result<Typed<'cx>, Error> {
         let cx = env.cx();
+
+        // Check custom fetcher first.
+        if let Some(fetcher) = env.fetcher() {
+            if let Some(result) = fetcher.fetch(self) {
+                let source = result?;
+                let typed = match self.mode {
+                    ImportMode::Code => {
+                        let parsed = Parsed::parse_str(&source)?;
+                        let typed = parsed.resolve_with_env(env)?.typecheck(cx)?;
+                        Typed {
+                            hir: typed.normalize(cx).to_hir(),
+                            ty: typed.ty,
+                        }
+                    }
+                    ImportMode::RawText => Typed {
+                        hir: Hir::new(
+                            HirKind::Expr(ExprKind::TextLit(source.into())),
+                            span.clone(),
+                        ),
+                        ty: Type::from_builtin(cx, Builtin::Text),
+                    },
+                    ImportMode::Location => {
+                        let expr = self.kind.to_location();
+                        Parsed::from_expr_without_imports(expr)
+                            .resolve(cx)
+                            .unwrap()
+                            .typecheck(cx)
+                            .unwrap()
+                    }
+                };
+                return Ok(typed);
+            }
+        }
+
+        // Default fetch.
         let typed = match self.mode {
             ImportMode::Code => {
                 let parsed = self.kind.fetch_dhall()?;
                 let typed = parsed.resolve_with_env(env)?.typecheck(cx)?;
                 Typed {
-                    // TODO: manage to keep the Nir around. Will need fixing variables.
                     hir: typed.normalize(cx).to_hir(),
                     ty: typed.ty,
                 }
@@ -553,6 +592,15 @@ pub fn resolve<'cx>(
     parsed: Parsed,
 ) -> Result<Resolved<'cx>, Error> {
     parsed.resolve_with_env(&mut ImportEnv::new(cx))
+}
+
+/// Like `resolve`, but uses a custom fetcher for import resolution.
+pub fn resolve_with_fetcher<'cx>(
+    cx: Ctxt<'cx>,
+    parsed: Parsed,
+    fetcher: Box<dyn ImportFetcher>,
+) -> Result<Resolved<'cx>, Error> {
+    parsed.resolve_with_env(&mut ImportEnv::with_fetcher(cx, fetcher))
 }
 
 /// Resolves names, and errors if we find any imports.

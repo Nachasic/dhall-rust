@@ -5,6 +5,17 @@ use crate::semantics::{check_hash, AlphaVar, Cache, ImportLocation, VarEnv};
 use crate::syntax::{Hash, Label, V};
 use crate::{Ctxt, ImportId, ImportResultId, Typed};
 
+/// Trait for custom import fetching. Implement this to resolve imports
+/// from sources other than the filesystem/HTTP (e.g. in-memory, virtual FS).
+///
+/// Receives the full `ImportLocation` so you can match on local paths,
+/// remote URLs, env vars, etc. Return `None` to fall back to the default.
+pub trait ImportFetcher {
+    /// Fetch Dhall source code for the given import location.
+    /// Return `None` to fall back to the default fetcher.
+    fn fetch(&self, location: &ImportLocation) -> Option<Result<String, Error>>;
+}
+
 /// Environment for resolving names.
 #[derive(Debug, Clone, Default)]
 pub struct NameEnv {
@@ -16,9 +27,10 @@ pub type CyclesStack = Vec<ImportLocation>;
 /// Environment for resolving imports
 pub struct ImportEnv<'cx> {
     cx: Ctxt<'cx>,
-    disk_cache: Option<Cache>, // `None` if it failed to initialize
+    disk_cache: Option<Cache>,
     mem_cache: HashMap<ImportLocation, ImportResultId<'cx>>,
     stack: CyclesStack,
+    fetcher: Option<Box<dyn ImportFetcher>>,
 }
 
 impl NameEnv {
@@ -72,7 +84,22 @@ impl<'cx> ImportEnv<'cx> {
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
+            fetcher: None,
         }
+    }
+
+    pub fn with_fetcher(cx: Ctxt<'cx>, fetcher: Box<dyn ImportFetcher>) -> Self {
+        ImportEnv {
+            cx,
+            disk_cache: Cache::new().ok(),
+            mem_cache: Default::default(),
+            stack: Default::default(),
+            fetcher: Some(fetcher),
+        }
+    }
+
+    pub fn fetcher(&self) -> Option<&dyn ImportFetcher> {
+        self.fetcher.as_deref()
     }
 
     pub fn cx(&self) -> Ctxt<'cx> {
