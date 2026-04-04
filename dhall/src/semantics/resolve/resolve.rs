@@ -48,6 +48,11 @@ pub struct ImportLocation {
 impl ImportLocation {
     pub fn kind(&self) -> &ImportLocationKind { &self.kind }
     pub fn mode(&self) -> ImportMode { self.mode }
+
+    /// Create a local file import location.
+    pub fn local(path: PathBuf, mode: ImportMode) -> Self {
+        ImportLocation { kind: ImportLocationKind::Local(path), mode }
+    }
 }
 
 impl ImportLocationKind {
@@ -419,7 +424,12 @@ fn fetch_import<'cx>(
     let cx = env.cx();
     let import = &cx[import_id].import;
     let span = cx[import_id].span.clone();
-    let location = cx[import_id].base_location.chain(import)?;
+
+    // Check custom fetcher for path resolution, fall back to default.
+    let location = match env.fetcher().and_then(|f| f.chain(&cx[import_id].base_location, import)) {
+        Some(result) => result?,
+        None => cx[import_id].base_location.chain(import)?,
+    };
 
     // If the hash is in the on-disk cache, return
     // the cached contents.

@@ -1,20 +1,14 @@
 //! Extensible evaluation engine for Dhall.
 //!
 //! Wraps the `dhall` crate to support custom builtin functions that
-//! participate in normalization.
-//!
-//! Custom builtins implement [`CustomBuiltinHandler`] (from `dhall`) and are
-//! registered by name. During normalization, when a builtin is applied to
-//! arguments, Dhall dispatches to the Rust callback. Results feed back into
-//! normalization — field access, arithmetic, conditionals all work.
+//! participate in normalization, and custom import resolution.
 
 pub mod conv;
-pub mod resolve;
 
 use std::sync::Arc;
 
 use dhall::ctxt::{CustomBuiltinEntry, CustomBuiltinHandler};
-use dhall::semantics::{Nir, NirKind};
+use dhall::semantics::{ImportFetcher, Nir, NirKind};
 use dhall::syntax::Label;
 use dhall::{Ctxt, Parsed};
 
@@ -23,32 +17,30 @@ pub mod types {
     pub use dhall::builtins::Builtin;
     pub use dhall::ctxt::CustomBuiltinHandler;
     pub use dhall::operations::OpKind;
-    pub use dhall::semantics::{Nir, NirKind, TextLit};
-    pub use dhall::syntax::{Expr, ExprKind, Label, NumKind, Span};
+    pub use dhall::semantics::{ImportFetcher, ImportLocation, ImportLocationKind, Nir, NirKind, TextLit};
+    pub use dhall::syntax::{Expr, ExprKind, ImportMode, Label, NumKind, Span};
     pub use dhall::{Ctxt, Normalized, Parsed, Resolved, Typed};
     pub use crate::conv::{DhallType, FromNir, IntoNir, NirExt, NirRecord, NirRecordBuilder};
 }
 
 // ── Engine ───────────────────────────────────────────────────────────
 
-pub struct Engine<R = resolve::DefaultResolver> {
-    resolver: R,
+pub struct Engine {
+    fetcher: Option<Arc<dyn for<'cx> ImportFetcher>>,
     builtins: Vec<CustomBuiltinEntry>,
 }
 
 impl Engine {
     pub fn new() -> Self {
-        Engine { resolver: resolve::DefaultResolver, builtins: Vec::new() }
+        Engine { fetcher: None, builtins: Vec::new() }
     }
-}
 
-impl Default for Engine {
-    fn default() -> Self { Self::new() }
-}
-
-impl<R> Engine<R> {
-    pub fn with_resolver<R2>(self, resolver: R2) -> Engine<R2> {
-        Engine { resolver, builtins: self.builtins }
+    /// Set a custom import fetcher. Receives the full `ImportLocation`
+    /// for each import — return `Some(Ok(source))` to provide content,
+    /// `Some(Err(...))` to fail, or `None` to fall back to default I/O.
+    pub fn with_fetcher(mut self, fetcher: impl ImportFetcher + 'static) -> Self {
+        self.fetcher = Some(Arc::new(fetcher));
+        self
     }
 
     pub fn with_builtin(
@@ -62,27 +54,23 @@ impl<R> Engine<R> {
         });
         self
     }
-}
 
-impl<R: resolve::ImportResolver> Engine<R> {
     pub fn eval_str(&self, input: &str) -> Result<dhall::syntax::Expr, dhall::error::Error> {
         if self.builtins.is_empty() {
             return Ctxt::with_new(|cx| {
-                let nir = self.run_pipeline(cx, Parsed::parse_str(input)?)?;
+                let nir = self.resolve_and_normalize(cx, Parsed::parse_str(input)?)?;
                 Ok(nir.to_expr(cx, Default::default()))
             });
         }
 
-        // Clone entries (Arc makes this cheap) for with_new_custom which takes by value.
         let entries = self.builtins.clone();
 
         Ctxt::with_new_custom(entries, |cx| {
-            // Resolve user source normally (builtin names will be free variables).
             let parsed = Parsed::parse_str(input)?;
-            let resolved = self.resolver.resolve(cx, parsed)?;
+            let resolved = self.resolve(cx, parsed)?;
             let expr = resolved.to_expr(cx);
 
-            // Build Hir with builtin names in scope as proper variables.
+            // Build Hir with builtin names in scope.
             let mut name_env = dhall::semantics::NameEnv::new();
             for b in &self.builtins {
                 name_env.insert_mut(&Label::from(b.name.as_str()));
@@ -103,7 +91,39 @@ impl<R: resolve::ImportResolver> Engine<R> {
         })
     }
 
-    fn run_pipeline<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<Nir<'cx>, dhall::error::Error> {
-        Ok(self.resolver.resolve(cx, p)?.typecheck(cx)?.normalize(cx).as_nir().clone())
+    fn resolve<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<dhall::Resolved<'cx>, dhall::error::Error> {
+        match &self.fetcher {
+            Some(f) => p.resolve_with_fetcher(cx, Box::new(ArcFetcher(Arc::clone(f)))),
+            None => p.resolve(cx),
+        }
+    }
+
+    fn resolve_and_normalize<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<Nir<'cx>, dhall::error::Error> {
+        Ok(self.resolve(cx, p)?.typecheck(cx)?.normalize(cx).as_nir().clone())
+    }
+}
+
+impl Default for Engine {
+    fn default() -> Self { Self::new() }
+}
+
+/// Wrapper to clone an Arc<dyn ImportFetcher> into a Box<dyn ImportFetcher>.
+struct ArcFetcher(Arc<dyn for<'cx> ImportFetcher>);
+
+impl ImportFetcher for ArcFetcher {
+    fn chain(&self, base: &dhall::semantics::ImportLocation, import: &dhall::semantics::Import) -> Option<Result<dhall::semantics::ImportLocation, dhall::error::Error>> {
+        self.0.chain(base, import)
+    }
+    fn fetch(&self, location: &dhall::semantics::ImportLocation) -> Option<Result<String, dhall::error::Error>> {
+        self.0.fetch(location)
+    }
+}
+
+/// A fetcher that rejects all imports. Useful for sandboxed evaluation.
+pub struct NoImports;
+
+impl ImportFetcher for NoImports {
+    fn fetch(&self, _location: &dhall::semantics::ImportLocation) -> Option<Result<String, dhall::error::Error>> {
+        Some(Err(dhall::error::Error::from(dhall::error::ImportError::Missing)))
     }
 }
