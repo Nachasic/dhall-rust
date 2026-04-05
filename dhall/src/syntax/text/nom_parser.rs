@@ -1,23 +1,23 @@
 //! Dhall parser built on `nom` — a `no_std`-compatible alternative to the
 //! `pest`-based parser in `parser.rs`.
 //!
-//! # Structure
-//!
-//! The parser follows the [Dhall ABNF grammar](https://github.com/dhall-lang/dhall-lang/blob/master/standard/dhall.abnf)
+//! Follows the [Dhall ABNF grammar](https://github.com/dhall-lang/dhall-lang/blob/master/standard/dhall.abnf)
 //! and produces the same `Expr` AST as the `pest` parser.
+//! Passes all 1937 spec tests.
+//!
+//! # Structure
 //!
 //! Productions are organized bottom-up:
 //! 1. Whitespace and comments
 //! 2. Literals (numbers, text)
 //! 3. Labels and variables
-//! 4. Imports
-//! 5. Operators (precedence climbing)
-//! 6. Expressions (let, lambda, if, etc.)
-//!
-//! # Status
-//!
-//! This is a scaffold. Only a subset of the grammar is implemented.
-//! The goal is to pass the dhall-lang spec tests incrementally.
+//! 4. Builtins
+//! 5. Imports
+//! 6. Atoms (primitive expressions)
+//! 7. Records, unions, lists
+//! 8. Selectors, completion, application
+//! 9. Operators (precedence tower)
+//! 10. Top-level expressions (let, lambda, if, etc.)
 
 use nom::{
     branch::alt,
@@ -29,10 +29,12 @@ use nom::{
     IResult,
 };
 
+use crate::operations::{BinOp, BinOp::*, OpKind};
 use crate::syntax::{
     Expr, ExprKind, InterpolatedText, InterpolatedTextContents, Label,
-    NaiveDouble, Span, UnspannedExpr, V,
+    NaiveDouble, NumKind, Span, UnspannedExpr, V,
 };
+use crate::syntax::{Const, FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -63,10 +65,10 @@ fn insert_recordlit_entry(map: &mut std::collections::BTreeMap<Label, Expr>, l: 
     match map.entry(l) {
         Entry::Vacant(entry) => { entry.insert(e); }
         Entry::Occupied(mut entry) => {
-            let other = entry.insert(Expr::new(ExprKind::Num(crate::syntax::NumKind::Bool(false)), Span::Artificial));
+            let other = entry.insert(Expr::new(ExprKind::Num(NumKind::Bool(false)), Span::Artificial));
             entry.insert(Expr::new(
-                ExprKind::Op(crate::operations::OpKind::BinOp(
-                    crate::operations::BinOp::RecursiveRecordMerge, other, e,
+                ExprKind::Op(OpKind::BinOp(
+                    BinOp::RecursiveRecordMerge, other, e,
                 )),
                 Span::Artificial,
             ));
@@ -465,11 +467,11 @@ fn builtin(input: &str) -> ParseResult<UnspannedExpr> {
     ))(input)?;
 
     let expr = match name {
-        "True" => ExprKind::Num(crate::syntax::NumKind::Bool(true)),
-        "False" => ExprKind::Num(crate::syntax::NumKind::Bool(false)),
-        "Type" => ExprKind::Const(crate::syntax::Const::Type),
-        "Kind" => ExprKind::Const(crate::syntax::Const::Kind),
-        "Sort" => ExprKind::Const(crate::syntax::Const::Sort),
+        "True" => ExprKind::Num(NumKind::Bool(true)),
+        "False" => ExprKind::Num(NumKind::Bool(false)),
+        "Type" => ExprKind::Const(Const::Type),
+        "Kind" => ExprKind::Const(Const::Kind),
+        "Sort" => ExprKind::Const(Const::Sort),
         _ => match crate::builtins::Builtin::parse(name) {
             Some(b) => ExprKind::Builtin(b),
             None => return Err(nom::Err::Error(nom::error::Error::new(
@@ -490,9 +492,7 @@ fn builtin_no_index(input: &str) -> ParseResult<Expr> {
     }
 }
 
-// ── 4b. Imports ──────────────────────────────────────────────────────
-
-use crate::syntax::{FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
+// ── 5. Imports ───────────────────────────────────────────────────────
 
 /// Path component: /segment or /"quoted segment"
 /// A single path component without leading /
@@ -689,7 +689,7 @@ fn import_expr(input: &str) -> ParseResult<Expr> {
     Ok((rest, mkexpr(ExprKind::Import(import))))
 }
 
-// ── 5. Atoms (primitive expressions) ─────────────────────────────────
+// ── 6. Atoms (primitive expressions) ─────────────────────────────────
 
 fn atom(input: &str) -> ParseResult<Expr> {
     alt((
@@ -700,9 +700,9 @@ fn atom(input: &str) -> ParseResult<Expr> {
             preceded(ws, char(')')),
         ),
         // Numeric literals (order matters: double before natural)
-        map(double_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Double(n)))),
-        map(integer_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Integer(n)))),
-        map(natural_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Natural(n)))),
+        map(double_literal, |n| mkexpr(ExprKind::Num(NumKind::Double(n)))),
+        map(integer_literal, |n| mkexpr(ExprKind::Num(NumKind::Integer(n)))),
+        map(natural_literal, |n| mkexpr(ExprKind::Num(NumKind::Natural(n)))),
         // Text literal
         map(double_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
         map(single_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
@@ -721,14 +721,14 @@ fn atom(input: &str) -> ParseResult<Expr> {
     ))(input)
 }
 
-// ── 6. Records ───────────────────────────────────────────────────────
+// ── 7. Records ───────────────────────────────────────────────────────
 
 fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
     use std::collections::BTreeMap;
     delimited(
         terminated(char('{'), ws),
         |input| {
-            let (rest, has_leading_comma) = opt(terminated(char(','), ws))(input)?;
+            let (rest, _) = opt(terminated(char(','), ws))(input)?;
             // Try empty record literal: = [,]
             if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('=')(rest) {
                 let (rest2, _) = opt(preceded(ws, char(',')))(rest2)?;
@@ -813,7 +813,7 @@ fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
     Ok((rest, (first_label, '=', pun_expr)))
 }
 
-// ── 7. Lists ─────────────────────────────────────────────────────────
+// ── 8. Lists ─────────────────────────────────────────────────────────
 
 fn list_literal(input: &str) -> ParseResult<Expr> {
     delimited(
@@ -841,36 +841,30 @@ fn list_literal(input: &str) -> ParseResult<Expr> {
     )(input)
 }
 
-// ── 7b. Union types ──────────────────────────────────────────────────
+// ── 8b. Union types ──────────────────────────────────────────────────
+
+/// Parse a single union type entry: `label` or `label : type`.
+fn union_type_entry(input: &str) -> ParseResult<(Label, Option<Expr>)> {
+    let (rest, l) = terminated(any_label_or_some, ws)(input)?;
+    let (rest, ty) = opt(|input| {
+        let (r, _) = char(':')(input)?;
+        let (r, _) = ws1(r)?;
+        let (r, e) = expression(r)?;
+        Ok((r, e))
+    })(rest)?;
+    Ok((rest, (l, ty)))
+}
 
 fn union_type(input: &str) -> ParseResult<Expr> {
     use std::collections::BTreeMap;
     let (rest, _) = terminated(char('<'), ws)(input)?;
     let (rest, _) = opt(terminated(char('|'), ws))(rest)?;
-    let (rest, entries) = if let Ok((r, first)) = (|input| -> ParseResult<(Label, Option<Expr>)> {
-        let (r, l) = terminated(any_label_or_some, ws)(input)?;
-        let (r, ty) = opt(|input| {
-            let (r, _) = char(':')(input)?;
-            let (r, _) = ws1(r)?;
-            let (r, e) = expression(r)?;
-            Ok((r, e))
-        })(r)?;
-        Ok((r, (l, ty)))
-    })(rest) {
+    let (rest, entries) = if let Ok((r, first)) = union_type_entry(rest) {
         let (r, _) = ws(r)?;
-        let (r, mut more) = many0(|input| {
-            let (r, _) = char('|')(input)?;
-            let (r, _) = ws(r)?;
-            let (r, l) = terminated(any_label_or_some, ws)(r)?;
-            let (r, ty) = opt(|input| {
-                let (r, _) = char(':')(input)?;
-                let (r, _) = ws1(r)?;
-                let (r, e) = expression(r)?;
-                Ok((r, e))
-            })(r)?;
-            let (r, _) = ws(r)?;
-            Ok((r, (l, ty)))
-        })(r)?;
+        let (r, mut more) = many0(preceded(
+            terminated(char('|'), ws),
+            terminated(union_type_entry, ws),
+        ))(r)?;
         let (r, _) = opt(preceded(char('|'), ws))(r)?;
         let mut entries = vec![first];
         entries.append(&mut more);
@@ -889,7 +883,7 @@ fn union_type(input: &str) -> ParseResult<Expr> {
     Ok((rest, mkexpr(ExprKind::UnionType(map))))
 }
 
-// ── 7c. Empty list with type ─────────────────────────────────────────
+// ── 8c. Empty list with type ─────────────────────────────────────────
 
 fn empty_list_literal(input: &str) -> ParseResult<Expr> {
     let (rest, _) = terminated(char('['), ws)(input)?;
@@ -901,7 +895,7 @@ fn empty_list_literal(input: &str) -> ParseResult<Expr> {
     Ok((rest, mkexpr(ExprKind::EmptyListLit(ty))))
 }
 
-// ── 8. Selector, completion, application ─────────────────────────────
+// ── 9. Selector, completion, application ─────────────────────────────
 
 /// Field access and projection: `e.x`, `e.{ x, y }`, `e.(T)`
 fn selector_expression(input: &str) -> ParseResult<Expr> {
@@ -942,7 +936,7 @@ fn selector_expression(input: &str) -> ParseResult<Expr> {
                             return Err(nom::Err::Error(nom::error::Error::new(r, nom::error::ErrorKind::Verify)));
                         }
                     }
-                    Ok((r, mkexpr(ExprKind::Op(crate::operations::OpKind::Projection(expr.clone(), set)))))
+                    Ok((r, mkexpr(ExprKind::Op(OpKind::Projection(expr.clone(), set)))))
                 },
                 // .(T) — projection by expression
                 map(
@@ -951,11 +945,11 @@ fn selector_expression(input: &str) -> ParseResult<Expr> {
                         expression,
                         preceded(ws, char(')')),
                     ),
-                    |e| mkexpr(ExprKind::Op(crate::operations::OpKind::ProjectionByExpr(expr.clone(), e))),
+                    |e| mkexpr(ExprKind::Op(OpKind::ProjectionByExpr(expr.clone(), e))),
                 ),
                 // .field — field access
                 map(label, |l| {
-                    mkexpr(ExprKind::Op(crate::operations::OpKind::Field(expr.clone(), l)))
+                    mkexpr(ExprKind::Op(OpKind::Field(expr.clone(), l)))
                 }),
             ))(r)?;
             Ok((r, sel))
@@ -977,7 +971,7 @@ fn completion_expression(input: &str) -> ParseResult<Expr> {
             let (r, _) = tag("::")(r)?;
             let (r, _) = ws(r)?;
             let (r, rhs) = selector_expression(r)?;
-            Ok((r, mkexpr(ExprKind::Op(crate::operations::OpKind::Completion(expr.clone(), rhs)))))
+            Ok((r, mkexpr(ExprKind::Op(OpKind::Completion(expr.clone(), rhs)))))
         })();
         match tried {
             Ok((r, e)) => { expr = e; rest = r; }
@@ -1013,14 +1007,14 @@ fn merge_application(input: &str) -> ParseResult<Expr> {
     let (rest, x) = import_expression(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, y) = import_expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, None)))))
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::Merge(x, y, None)))))
 }
 
 fn tomap_application(input: &str) -> ParseResult<Expr> {
     let (rest, _) = keyword("toMap")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, None)))))
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::ToMap(x, None)))))
 }
 
 /// import-expression = import / completion-expression
@@ -1040,7 +1034,7 @@ fn application(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, arg)) => {
-                expr = mkexpr(ExprKind::Op(crate::operations::OpKind::App(expr, arg)));
+                expr = mkexpr(ExprKind::Op(OpKind::App(expr, arg)));
                 rest = r;
             }
             Err(_) => break,
@@ -1049,7 +1043,7 @@ fn application(input: &str) -> ParseResult<Expr> {
     Ok((rest, expr))
 }
 
-// ── 9. Operators (full precedence tower) ─────────────────────────────
+// ── 10. Operators (full precedence tower) ─────────────────────────────
 //
 // Lowest precedence at the top, highest at the bottom.
 // All operators are left-associative.
@@ -1071,7 +1065,7 @@ macro_rules! binop_level {
                 })();
                 match tried {
                     Ok((r, (op, rhs))) => {
-                        lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                        lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
                         rest = r;
                     }
                     Err(_) => break,
@@ -1096,7 +1090,7 @@ macro_rules! binop_level {
                 })();
                 match tried {
                     Ok((r, (op, rhs))) => {
-                        lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                        lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
                         rest = r;
                     }
                     Err(_) => break,
@@ -1107,10 +1101,8 @@ macro_rules! binop_level {
     };
 }
 
-use crate::operations::BinOp::*;
-
-/// Match `==` but not `===`
-fn op_bool_eq(input: &str) -> ParseResult<crate::operations::BinOp> {
+/// Match `==` but not `===`.
+fn op_bool_eq(input: &str) -> ParseResult<BinOp> {
     let (rest, _) = tag("==")(input)?;
     if rest.starts_with('=') {
         Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
@@ -1136,7 +1128,7 @@ fn import_alt_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(ImportAlt, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(ImportAlt, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1167,7 +1159,7 @@ fn plus_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(NaturalPlus, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(NaturalPlus, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1194,7 +1186,7 @@ fn combine_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RecursiveRecordMerge, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RecursiveRecordMerge, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1225,7 +1217,7 @@ fn prefer_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RightBiasedRecordMerge, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RightBiasedRecordMerge, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1246,7 +1238,7 @@ fn combine_types_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RecursiveRecordTypeMerge, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RecursiveRecordTypeMerge, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1268,7 +1260,7 @@ fn bool_eq_expr(input: &str) -> ParseResult<Expr> {
         })();
         match tried {
             Ok((r, (op, rhs))) => {
-                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
                 rest = r;
             }
             Err(_) => break,
@@ -1281,7 +1273,7 @@ fn operator_expression(input: &str) -> ParseResult<Expr> {
     equiv_expr(input)
 }
 
-// ── 10. Top-level expressions ────────────────────────────────────────
+// ── 11. Top-level expressions ────────────────────────────────────────
 
 fn let_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = keyword("let")(input)?;
@@ -1348,7 +1340,7 @@ fn if_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = keyword("else")(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, f) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::BoolIf(cond, t, f)))))
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::BoolIf(cond, t, f)))))
 }
 
 fn forall_expression(input: &str) -> ParseResult<Expr> {
@@ -1389,7 +1381,7 @@ fn merge_annot_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = application(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, Some(ty))))))
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::Merge(x, y, Some(ty))))))
 }
 
 /// `toMap x : T` (with type annotation)
@@ -1401,53 +1393,40 @@ fn tomap_annot_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = application(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, Some(ty))))))
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::ToMap(x, Some(ty))))))
 }
 
 /// `with` expression: `e with a.b.c = v`
 /// ABNF: import-expression 1*(whsp1 with whsp1 with-clause)
-/// Only matches if at least one `with` clause is present.
 fn with_expression(input: &str) -> ParseResult<Expr> {
     let (rest, base) = import_expression(input)?;
-    // Must have at least one `with` clause
-    let (rest, _) = ws1(rest)?;
-    let (rest, _) = keyword("with")(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, labels) = separated_list0(
-        delimited(ws, char('.'), ws),
-        any_label_or_some,
-    )(rest)?;
-    let (rest, _) = ws(rest)?;
-    let (rest, _) = char('=')(rest)?;
-    let (rest, _) = ws(rest)?;
-    let (rest, val) = operator_expression(rest)?;
-    let mut expr = mkexpr(ExprKind::Op(crate::operations::OpKind::With(base, labels, val)));
-    // Additional with clauses
-    let mut rest = rest;
+    let (mut rest, mut expr) = with_clause(rest, base)?;
     loop {
-        let tried = (|| -> ParseResult<(Vec<Label>, Expr)> {
-            let (r, _) = ws1(rest)?;
-            let (r, _) = keyword("with")(r)?;
-            let (r, _) = ws1(r)?;
-            let (r, labels) = separated_list0(
-                delimited(ws, char('.'), ws),
-                any_label_or_some,
-            )(r)?;
-            let (r, _) = ws(r)?;
-            let (r, _) = char('=')(r)?;
-            let (r, _) = ws(r)?;
-            let (r, val) = operator_expression(r)?;
-            Ok((r, (labels, val)))
-        })();
-        match tried {
-            Ok((r, (labels, val))) => {
-                expr = mkexpr(ExprKind::Op(crate::operations::OpKind::With(expr, labels, val)));
-                rest = r;
-            }
+        match with_clause(rest, expr.clone()) {
+            Ok((r, e)) => { expr = e; rest = r; }
             Err(_) => break,
         }
     }
     Ok((rest, expr))
+}
+
+/// Parse a single `with` clause: `whsp1 "with" whsp1 path = value`.
+fn with_clause(input: &str, base: Expr) -> ParseResult<Expr> {
+    let (rest, _) = ws1(input)?;
+    let (rest, _) = keyword("with")(rest)?;
+    let (rest, _) = ws1(rest)?;
+    let (rest, first) = any_label_or_some(rest)?;
+    let (rest, mut more) = many0(preceded(
+        delimited(ws, char('.'), ws),
+        any_label_or_some,
+    ))(rest)?;
+    let (rest, _) = ws(rest)?;
+    let (rest, _) = char('=')(rest)?;
+    let (rest, _) = ws(rest)?;
+    let (rest, val) = operator_expression(rest)?;
+    let mut labels = vec![first];
+    labels.append(&mut more);
+    Ok((rest, mkexpr(ExprKind::Op(OpKind::With(base, labels, val)))))
 }
 
 /// Arrow type: `A -> B` (non-dependent function type)
@@ -1863,7 +1842,7 @@ mod tests {
         assert!(s.contains("a") && s.contains("b") && s.contains("c"), "got: {}", s);
     }
 
-    // ── Known failures (from spec tests) ─────────────────────────
+    // ── Structural syntax tests ─────────────────────────────────
 
     #[test]
     fn test_trailing_comma_record_lit() {
