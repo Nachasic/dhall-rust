@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use dhall_engine::{types::*, Engine};
 
 /// An in-memory fetcher that controls both path resolution and content fetching.
 /// Paths are stored and looked up as-is — no filesystem canonicalization.
-struct InMemoryFetcher(HashMap<PathBuf, String>);
+struct InMemoryFetcher(HashMap<LocalPath, String>);
 
 impl ImportFetcher for InMemoryFetcher {
     fn chain(
@@ -13,11 +12,9 @@ impl ImportFetcher for InMemoryFetcher {
         _base: &ImportLocation,
         import: &dhall::semantics::Import,
     ) -> Option<Result<ImportLocation, dhall::error::Error>> {
-        // For local imports, resolve to our own canonical path (just the
-        // file_path components joined) instead of the filesystem-based default.
         match &import.location {
             dhall::syntax::ImportTarget::Local(_prefix, file_path) => {
-                let path: PathBuf = file_path.file_path.iter().collect();
+                let path: LocalPath = file_path.file_path.join("/").into();
                 Some(Ok(ImportLocation::local(path, import.mode)))
             }
             _ => None,
@@ -27,7 +24,6 @@ impl ImportFetcher for InMemoryFetcher {
     fn fetch(&self, location: &ImportLocation) -> Option<Result<String, dhall::error::Error>> {
         match location.kind() {
             ImportLocationKind::Local(path) => {
-                // Direct lookup — paths match because we control chain().
                 self.0.get(path).map(|s| Ok(s.clone()))
             }
             _ => None,
@@ -39,7 +35,7 @@ impl ImportFetcher for InMemoryFetcher {
 fn test_in_memory_import() {
     let mut files = HashMap::new();
     files.insert(
-        PathBuf::from("config.dhall"),
+        LocalPath::from("config.dhall"),
         r#"{ port = 8080, host = "localhost" }"#.to_string(),
     );
 
@@ -56,11 +52,11 @@ fn test_in_memory_import() {
 fn test_in_memory_nested_import() {
     let mut files = HashMap::new();
     files.insert(
-        PathBuf::from("types.dhall"),
+        LocalPath::from("types.dhall"),
         "{ Config = { port : Natural, host : Text } }".to_string(),
     );
     files.insert(
-        PathBuf::from("config.dhall"),
+        LocalPath::from("config.dhall"),
         r#"let T = ./types.dhall in { port = 8080, host = "localhost" } : T.Config"#.to_string(),
     );
 

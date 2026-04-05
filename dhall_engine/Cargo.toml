@@ -8,3 +8,4 @@ repository = "https://github.com/Nadrieril/dhall-rust"
 
 [dependencies]
 dhall = { path = "../dhall", default-features = false }
+hashbrown = "0.14"

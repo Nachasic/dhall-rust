@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use dhall::semantics::{Nir, NirKind};
 use dhall::syntax::{Label, NaiveDouble, NumKind};

@@ -17,7 +17,7 @@ pub mod types {
     pub use dhall::builtins::Builtin;
     pub use dhall::ctxt::CustomBuiltinHandler;
     pub use dhall::operations::OpKind;
-    pub use dhall::semantics::{ImportFetcher, ImportLocation, ImportLocationKind, Nir, NirKind, TextLit};
+    pub use dhall::semantics::{ImportFetcher, ImportLocation, ImportLocationKind, LocalPath, Nir, NirKind, TextLit};
     pub use dhall::syntax::{Expr, ExprKind, ImportMode, Label, NumKind, Span};
     pub use dhall::{Ctxt, Normalized, Parsed, Resolved, Typed};
     pub use crate::conv::{DhallType, FromNir, IntoNir, NirExt, NirRecord, NirRecordBuilder};
