@@ -6,6 +6,10 @@ description = "Extensible evaluation engine for the Dhall configuration language
 license = "BSD-2-Clause"
 repository = "https://github.com/Nadrieril/dhall-rust"
 
+[features]
+default = ["std"]
+std = ["dhall/std"]
+
 [dependencies]
 dhall = { path = "../dhall", default-features = false }
 hashbrown = "0.14"

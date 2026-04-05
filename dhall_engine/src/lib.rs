@@ -3,9 +3,17 @@
 //! Wraps the `dhall` crate to support custom builtin functions that
 //! participate in normalization, and custom import resolution.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 pub mod conv;
 
-use std::sync::Arc;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use dhall::ctxt::{CustomBuiltinEntry, CustomBuiltinHandler};
 use dhall::semantics::{ImportFetcher, Nir, NirKind, TyEnv, type_with};
