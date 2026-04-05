@@ -1,3 +1,7 @@
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::syntax::trivial_result;
 
 /// The beginning of a file path which anchors subsequent path components

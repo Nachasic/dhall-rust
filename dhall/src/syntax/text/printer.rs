@@ -1,8 +1,11 @@
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
 use crate::builtins::Builtin;
 use crate::operations::{BinOp, OpKind};
 use crate::syntax::*;
 use itertools::Itertools;
-use std::fmt::{self, Display};
+use core::fmt::{self, Display};
 
 // There is a one-to-one correspondence between the formatter and the grammar. Each phase is
 // named after a corresponding grammar group, and the structure of the formatter reflects
@@ -389,9 +392,9 @@ impl Display for BinOp {
 impl Display for NaiveDouble {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let v = f64::from(*self);
-        if v == std::f64::INFINITY {
+        if v == core::f64::INFINITY {
             f.write_str("Infinity")
-        } else if v == std::f64::NEG_INFINITY {
+        } else if v == core::f64::NEG_INFINITY {
             f.write_str("-Infinity")
         } else if v.is_nan() {
             f.write_str("NaN")

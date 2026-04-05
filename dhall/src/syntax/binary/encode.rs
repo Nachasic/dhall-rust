@@ -1,4 +1,6 @@
-use std::vec;
+use alloc::vec;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use crate::builtins::Builtin;
 use crate::error::EncodeError;

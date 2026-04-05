@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use hashbrown::HashMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::operations::{normalize_operation, OpKind};
 use crate::semantics::NzEnv;
@@ -27,7 +29,7 @@ pub fn apply_any<'cx>(f: &Nir<'cx>, a: Nir<'cx>) -> NirKind<'cx> {
 pub fn squash_textlit<'cx>(
     elts: impl Iterator<Item = InterpolatedTextContents<Nir<'cx>>>,
 ) -> Vec<InterpolatedTextContents<Nir<'cx>>> {
-    use std::mem::replace;
+    use core::mem::replace;
     use InterpolatedTextContents::{Expr, Text};
 
     fn inner<'cx>(
@@ -69,7 +71,7 @@ pub fn merge_maps<K, V, F>(
 ) -> HashMap<K, V>
 where
     F: FnMut(&K, &V, &V) -> V,
-    K: std::hash::Hash + Eq + Clone,
+    K: core::hash::Hash + Eq + Clone,
     V: Clone,
 {
     let mut kvs = HashMap::new();

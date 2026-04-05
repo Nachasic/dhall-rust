@@ -1,7 +1,19 @@
+#[cfg(feature = "std")]
 use annotate_snippets::{
     display_list::DisplayList,
     snippet::{Annotation, AnnotationType, Slice, Snippet, SourceAnnotation},
 };
+
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationType {
+    Error,
+    Help,
+    Note,
+}
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::syntax::{ParsedSpan, Span};
 
@@ -28,6 +40,7 @@ struct FreeAnnotation {
     annotation_type: AnnotationType,
 }
 
+#[cfg(feature = "std")]
 impl SpannedAnnotation {
     fn to_annotation(&self) -> SourceAnnotation<'_> {
         SourceAnnotation {
@@ -38,6 +51,7 @@ impl SpannedAnnotation {
     }
 }
 
+#[cfg(feature = "std")]
 impl FreeAnnotation {
     fn to_annotation(&self) -> Annotation<'_> {
         Annotation {
@@ -120,40 +134,57 @@ impl ErrorBuilder {
         if self.consumed {
             panic!("tried to format the same ErrorBuilder twice")
         }
-        let this = std::mem::take(self);
+        let this = core::mem::take(self);
         self.consumed = true;
 
-        let input;
-        let slices = if this.annotations.is_empty() {
-            Vec::new()
-        } else {
-            input = this.annotations[0].span.to_input();
-            let annotations = this
-                .annotations
+        #[cfg(feature = "std")]
+        {
+            let input;
+            let slices = if this.annotations.is_empty() {
+                Vec::new()
+            } else {
+                input = this.annotations[0].span.to_input();
+                let annotations = this
+                    .annotations
+                    .iter()
+                    .map(|annot| annot.to_annotation())
+                    .collect();
+                alloc::vec![Slice {
+                    source: &input,
+                    line_start: 1, // TODO
+                    origin: Some("<current file>"),
+                    fold: true,
+                    annotations,
+                }]
+            };
+            let footer = this
+                .footer
                 .iter()
                 .map(|annot| annot.to_annotation())
                 .collect();
-            vec![Slice {
-                source: &input,
-                line_start: 1, // TODO
-                origin: Some("<current file>"),
-                fold: true,
-                annotations,
-            }]
-        };
-        let footer = this
-            .footer
-            .iter()
-            .map(|annot| annot.to_annotation())
-            .collect();
 
-        let snippet = Snippet {
-            title: Some(this.title.to_annotation()),
-            slices,
-            footer,
-            opt: Default::default(),
-        };
-        DisplayList::from(snippet).to_string()
+            let snippet = Snippet {
+                title: Some(this.title.to_annotation()),
+                slices,
+                footer,
+                opt: Default::default(),
+            };
+            DisplayList::from(snippet).to_string()
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            use alloc::format;
+            use core::fmt::Write;
+            let mut out = format!("error: {}", this.title.message);
+            for annot in &this.annotations {
+                let _ = write!(out, "\n  --> {}", annot.message);
+            }
+            for annot in &this.footer {
+                let _ = write!(out, "\n  = {}", annot.message);
+            }
+            out
+        }
     }
 }
 

@@ -1,4 +1,6 @@
-use std::cmp::max;
+use alloc::format;
+use alloc::string::ToString;
+use core::cmp::max;
 
 use crate::builtins::{type_of_builtin, Builtin};
 use crate::error::{ErrorBuilder, TypeError, TypeMessage};

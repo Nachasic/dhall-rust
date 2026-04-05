@@ -1,4 +1,6 @@
-use std::rc::Rc;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::{String, ToString};
 
 /// A location in the source text
 #[derive(Debug, Clone)]
@@ -47,7 +49,7 @@ impl Span {
     /// input between them. Assumes that the spans come from the same input. Fails if one of the
     /// spans does not point to an input location.
     pub fn union(&self, other: &Span) -> Self {
-        use std::cmp::{max, min};
+        use core::cmp::{max, min};
         use Span::*;
         match (self, other) {
             (Parsed(x), Parsed(y)) if Rc::ptr_eq(&x.input, &y.input) => {
@@ -74,7 +76,7 @@ impl Span {
 /// Convert a byte idx into a string into a char idx for consumption by annotate_snippets.
 /// The byte idx must be at a char boundary.
 fn char_idx_from_byte_idx(input: &str, idx: usize) -> usize {
-    use std::iter::once;
+    use core::iter::once;
     input
         .char_indices()
         .map(|(byte_i, _)| byte_i) // We don't care about the char

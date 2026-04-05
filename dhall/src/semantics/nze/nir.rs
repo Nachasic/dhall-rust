@@ -1,5 +1,8 @@
-use std::collections::HashMap;
-use std::rc::Rc;
+use hashbrown::HashMap;
+use alloc::rc::Rc;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::builtins::{Builtin, BuiltinClosure};
 use crate::operations::{BinOp, OpKind};
@@ -427,32 +430,32 @@ impl<'cx> lazy::Eval<NirKind<'cx>> for Thunk<'cx> {
 }
 
 /// Compare two values for equality modulo alpha/beta-equivalence.
-impl<'cx> std::cmp::PartialEq for Nir<'cx> {
+impl<'cx> core::cmp::PartialEq for Nir<'cx> {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0) || self.kind() == other.kind()
     }
 }
-impl<'cx> std::cmp::Eq for Nir<'cx> {}
+impl<'cx> core::cmp::Eq for Nir<'cx> {}
 
-impl<'cx> std::cmp::PartialEq for Thunk<'cx> {
+impl<'cx> core::cmp::PartialEq for Thunk<'cx> {
     fn eq(&self, _other: &Self) -> bool {
         unreachable!(
             "Trying to compare thunks but we should only compare WHNFs"
         )
     }
 }
-impl<'cx> std::cmp::Eq for Thunk<'cx> {}
+impl<'cx> core::cmp::Eq for Thunk<'cx> {}
 
-impl<'cx> std::cmp::PartialEq for Closure<'cx> {
+impl<'cx> core::cmp::PartialEq for Closure<'cx> {
     fn eq(&self, other: &Self) -> bool {
         let v = NzVar::fresh();
         self.apply_var(v) == other.apply_var(v)
     }
 }
-impl<'cx> std::cmp::Eq for Closure<'cx> {}
+impl<'cx> core::cmp::Eq for Closure<'cx> {}
 
-impl<'cx> std::fmt::Debug for Nir<'cx> {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'cx> core::fmt::Debug for Nir<'cx> {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if let NirKind::Const(c) = self.kind() {
             return write!(fmt, "{:?}", c);
         }

@@ -1,3 +1,5 @@
+use alloc::format;
+
 use crate::builtins::Builtin;
 use crate::error::{ErrorBuilder, TypeError};
 use crate::semantics::{mkerr, Hir, Nir, NirKind, NzEnv, TyEnv, VarEnv};

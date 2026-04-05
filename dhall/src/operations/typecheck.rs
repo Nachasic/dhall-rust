@@ -1,6 +1,7 @@
-use std::borrow::Cow;
-use std::cmp::max;
-use std::collections::HashMap;
+use alloc::borrow::Cow;
+use alloc::format;
+use core::cmp::max;
+use hashbrown::HashMap;
 
 use crate::builtins::Builtin;
 use crate::error::{ErrorBuilder, TypeError};

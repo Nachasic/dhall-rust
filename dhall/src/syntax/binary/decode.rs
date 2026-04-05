@@ -1,6 +1,10 @@
 use itertools::Itertools;
-use std::collections::BTreeMap;
-use std::iter::FromIterator;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::borrow::ToOwned;
+use core::iter::FromIterator;
 
 use crate::error::DecodeError;
 use crate::operations::OpKind;

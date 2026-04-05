@@ -1,6 +1,7 @@
 use itertools::Itertools;
-use std::collections::HashMap;
-use std::iter::once;
+use hashbrown::HashMap;
+use alloc::vec::Vec;
+use core::iter::once;
 
 use crate::operations::{BinOp, OpKind};
 use crate::semantics::{

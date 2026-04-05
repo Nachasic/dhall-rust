@@ -1,5 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
-use std::convert::TryInto;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
+use core::convert::TryInto;
 
 use crate::operations::{BinOp, OpKind};
 use crate::semantics::{nze, Hir, HirKind, Nir, NirKind, NzEnv, VarEnv};
@@ -99,7 +105,7 @@ impl<'cx> BuiltinClosure<'cx> {
         apply_builtin(b, Vec::new(), env)
     }
     pub fn apply(&self, a: Nir<'cx>) -> NirKind<'cx> {
-        use std::iter::once;
+        use core::iter::once;
         let args = self.args.iter().cloned().chain(once(a)).collect();
         apply_builtin(self.b, args, self.env.clone())
     }
@@ -410,7 +416,7 @@ fn apply_builtin<'cx>(
                 if let Some(s) = tlit.as_text() {
                     // Printing InterpolatedText takes care of all the escaping
                     let txt: InterpolatedText<Expr> =
-                        std::iter::once(InterpolatedTextContents::Text(s))
+                        core::iter::once(InterpolatedTextContents::Text(s))
                             .collect();
                     Ret::Nir(Nir::from_text(txt))
                 } else {
@@ -583,15 +589,15 @@ fn apply_builtin<'cx>(
     }
 }
 
-impl<'cx> std::cmp::PartialEq for BuiltinClosure<'cx> {
+impl<'cx> core::cmp::PartialEq for BuiltinClosure<'cx> {
     fn eq(&self, other: &Self) -> bool {
         self.b == other.b && self.args == other.args
     }
 }
-impl<'cx> std::cmp::Eq for BuiltinClosure<'cx> {}
+impl<'cx> core::cmp::Eq for BuiltinClosure<'cx> {}
 
-impl std::fmt::Display for Builtin {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for Builtin {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         use Builtin::*;
         f.write_str(match *self {
             Bool => "Bool",

@@ -17,14 +17,14 @@ impl Binder {
 }
 
 /// Equality up to alpha-equivalence
-impl std::cmp::PartialEq for Binder {
+impl core::cmp::PartialEq for Binder {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
 }
 
-impl std::fmt::Debug for Binder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Binder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Binder({})", &self.name)
     }
 }

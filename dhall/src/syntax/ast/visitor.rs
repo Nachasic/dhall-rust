@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use std::iter::FromIterator;
+use core::iter::FromIterator;
 
 use crate::syntax::*;
 

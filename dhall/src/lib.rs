@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![doc(html_root_url = "https://docs.rs/dhall/0.13.0")]
 #![allow(
     clippy::implicit_hasher,
@@ -13,6 +14,8 @@
     unknown_lints
 )]
 
+extern crate alloc;
+
 pub mod builtins;
 pub mod ctxt;
 pub mod error;
@@ -21,10 +24,12 @@ pub mod semantics;
 pub mod syntax;
 pub mod utils;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use url::Url;
+
+use alloc::boxed::Box;
 
 use crate::error::{Error, TypeError};
 use crate::semantics::parse;
@@ -70,18 +75,18 @@ impl Parsed {
         Parsed(e, ImportLocation::dhall_code_without_imports())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     pub fn parse_file(f: &Path) -> Result<Parsed, Error> {
         parse::parse_file(f)
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     pub fn parse_remote(url: Url) -> Result<Parsed, Error> {
         parse::parse_remote(url)
     }
     pub fn parse_str(s: &str) -> Result<Parsed, Error> {
         parse::parse_str(s)
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     pub fn parse_binary_file(f: &Path) -> Result<Parsed, Error> {
         parse::parse_binary_file(f)
     }
@@ -214,19 +219,19 @@ impl<'cx> Normalized<'cx> {
 
 macro_rules! derive_traits_for_wrapper_struct {
     ($ty:ident) => {
-        impl std::cmp::PartialEq for $ty {
+        impl core::cmp::PartialEq for $ty {
             fn eq(&self, other: &Self) -> bool {
                 self.0 == other.0
             }
         }
 
-        impl std::cmp::Eq for $ty {}
+        impl core::cmp::Eq for $ty {}
 
-        impl std::fmt::Display for $ty {
+        impl core::fmt::Display for $ty {
             fn fmt(
                 &self,
-                f: &mut std::fmt::Formatter,
-            ) -> Result<(), std::fmt::Error> {
+                f: &mut core::fmt::Formatter,
+            ) -> Result<(), core::fmt::Error> {
                 self.0.fmt(f)
             }
         }

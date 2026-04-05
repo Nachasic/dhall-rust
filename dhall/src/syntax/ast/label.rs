@@ -1,4 +1,6 @@
-use std::rc::Rc;
+use alloc::rc::Rc;
+use alloc::string::String;
+use alloc::borrow::ToOwned;
 
 // The type for labels throughout the AST
 // It owns the data because otherwise lifetimes would make recursive imports impossible
@@ -24,7 +26,7 @@ impl From<&Label> for String {
     }
 }
 
-impl std::borrow::Borrow<str> for Label {
+impl core::borrow::Borrow<str> for Label {
     fn borrow(&self) -> &str {
         self.0.as_ref()
     }

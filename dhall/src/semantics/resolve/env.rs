@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use hashbrown::HashMap;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::error::{Error, ImportError};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use crate::semantics::Cache;
 use crate::semantics::{check_hash, AlphaVar, ImportLocation, VarEnv};
 use crate::syntax::{Hash, Label, V};
@@ -39,7 +42,7 @@ pub type CyclesStack = Vec<ImportLocation>;
 /// Environment for resolving imports
 pub struct ImportEnv<'cx> {
     cx: Ctxt<'cx>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     disk_cache: Option<Cache>,
     mem_cache: HashMap<ImportLocation, ImportResultId<'cx>>,
     stack: CyclesStack,
@@ -94,7 +97,7 @@ impl<'cx> ImportEnv<'cx> {
     pub fn new(cx: Ctxt<'cx>) -> Self {
         ImportEnv {
             cx,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
@@ -105,7 +108,7 @@ impl<'cx> ImportEnv<'cx> {
     pub fn with_fetcher(cx: Ctxt<'cx>, fetcher: Box<dyn ImportFetcher>) -> Self {
         ImportEnv {
             cx,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
@@ -132,13 +135,13 @@ impl<'cx> ImportEnv<'cx> {
         &self,
         hash: &Option<Hash>,
     ) -> Option<Typed<'cx>> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
         {
             let hash = hash.as_ref()?;
             let expr = self.disk_cache.as_ref()?.get(self.cx(), hash).ok()?;
             return Some(expr);
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", not(feature = "std")))]
         { let _ = hash; None }
     }
 
@@ -163,14 +166,14 @@ impl<'cx> ImportEnv<'cx> {
         hash: &Option<Hash>,
         result: ImportResultId<'cx>,
     ) {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
         if let Some(disk_cache) = self.disk_cache.as_ref() {
             if let Some(hash) = hash {
                 let expr = &self.cx()[result];
                 let _ = disk_cache.insert(self.cx(), hash, expr);
             }
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", not(feature = "std")))]
         { let _ = (hash, result); }
     }
 

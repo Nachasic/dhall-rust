@@ -1,4 +1,7 @@
-use std::iter::FromIterator;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::iter::FromIterator;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InterpolatedText<SubExpr> {
@@ -110,7 +113,7 @@ impl<SubExpr> InterpolatedText<SubExpr> {
     pub fn iter<'a>(
         &'a self,
     ) -> impl Iterator<Item = InterpolatedTextContents<&'a SubExpr>> + 'a {
-        use std::iter::once;
+        use core::iter::once;
         use InterpolatedTextContents::{Expr, Text};
         let exprs = self.tail.iter().map(|(e, _)| Expr(e));
         let texts = self.tail.iter().map(|(_, s)| Text(s.clone()));
@@ -120,7 +123,7 @@ impl<SubExpr> InterpolatedText<SubExpr> {
     pub fn into_iter(
         self,
     ) -> impl Iterator<Item = InterpolatedTextContents<SubExpr>> {
-        use std::iter::once;
+        use core::iter::once;
         use InterpolatedTextContents::{Expr, Text};
         once(Text(self.head)).chain(
             self.tail

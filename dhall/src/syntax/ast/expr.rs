@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use crate::builtins::Builtin;
 use crate::error::Error;
@@ -206,10 +208,10 @@ impl PartialEq for NaiveDouble {
 
 impl Eq for NaiveDouble {}
 
-impl std::hash::Hash for NaiveDouble {
+impl core::hash::Hash for NaiveDouble {
     fn hash<H>(&self, state: &mut H)
     where
-        H: std::hash::Hasher,
+        H: core::hash::Hasher,
     {
         self.0.to_bits().hash(state)
     }
@@ -233,18 +235,18 @@ impl From<Label> for V {
     }
 }
 
-impl std::cmp::PartialEq for Expr {
+impl core::cmp::PartialEq for Expr {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
     }
 }
 
-impl std::cmp::Eq for Expr {}
+impl core::cmp::Eq for Expr {}
 
-impl std::hash::Hash for Expr {
+impl core::hash::Hash for Expr {
     fn hash<H>(&self, state: &mut H)
     where
-        H: std::hash::Hasher,
+        H: core::hash::Hasher,
     {
         self.kind.hash(state)
     }

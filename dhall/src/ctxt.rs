@@ -1,8 +1,8 @@
-use std::cell::RefCell;
-use once_cell::sync::OnceCell;
-use std::marker::PhantomData;
-use std::ops::{Deref, Index};
-use std::sync::Arc;
+use core::cell::RefCell;
+use core::cell::Cell;
+use core::marker::PhantomData;
+use core::ops::{Deref, Index};
+use alloc::sync::Arc;
 
 /// Append-only vector that allows pushing through a shared reference.
 /// Items are boxed so references to them remain stable.
@@ -33,6 +33,10 @@ impl<T> Index<usize> for AppendVec<Box<T>> {
         unsafe { &*ptr }
     }
 }
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::semantics::{Import, ImportLocation, ImportNode, Nir};
 use crate::syntax::Span;
@@ -80,6 +84,7 @@ pub struct Ctxt<'cx>(&'cx CtxtS<'cx>);
 impl Ctxt<'_> {
     pub fn with_new<T>(f: impl for<'cx> FnOnce(Ctxt<'cx>) -> T) -> T {
         let cx = CtxtS::default();
+        let cx = core::mem::ManuallyDrop::new(cx);
         let cx = Ctxt(&cx);
         f(cx)
     }
@@ -90,6 +95,7 @@ impl Ctxt<'_> {
     ) -> T {
         let mut cx = CtxtS::default();
         cx.custom_builtins = builtins;
+        let cx = core::mem::ManuallyDrop::new(cx);
         let cx = Ctxt(&cx);
         f(cx)
     }
@@ -127,8 +133,8 @@ where
 
 /// Empty impl, because `AppendVec` does not implement `Debug` and I can't be bothered to do it
 /// myself.
-impl<'cx> std::fmt::Debug for Ctxt<'cx> {
-    fn fmt(&self, _: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl<'cx> core::fmt::Debug for Ctxt<'cx> {
+    fn fmt(&self, _: &mut core::fmt::Formatter) -> core::fmt::Result {
         Ok(())
     }
 }
@@ -151,18 +157,18 @@ pub struct StoredImport<'cx> {
     pub base_location: ImportLocation,
     pub import: Import,
     pub span: Span,
-    result: OnceCell<ImportResultId<'cx>>,
+    result: Cell<Option<ImportResultId<'cx>>>,
 }
 
 impl<'cx> StoredImport<'cx> {
     /// Get the id of the result of fetching this import. Returns `None` if the result has not yet
     /// been fetched.
     pub fn get_resultid(&self) -> Option<ImportResultId<'cx>> {
-        self.result.get().copied()
+        self.result.get()
     }
     /// Store the result of fetching this import.
     pub fn set_resultid(&self, res: ImportResultId<'cx>) {
-        let _ = self.result.set(res);
+        self.result.set(Some(res));
     }
     /// Get the result of fetching this import. Returns `None` if the result has not yet been
     /// fetched.
@@ -199,7 +205,7 @@ impl<'cx> Ctxt<'cx> {
             base_location,
             import,
             span,
-            result: OnceCell::new(),
+            result: Cell::new(None),
         };
         let id = self.0.imports.len();
         self.0.imports.push(Box::new(stored));
@@ -224,13 +230,13 @@ pub struct StoredImportAlternative<'cx> {
     pub left_imports: Box<[ImportNode<'cx>]>,
     pub right_imports: Box<[ImportNode<'cx>]>,
     /// `true` for left, `false` for right.
-    selected: OnceCell<bool>,
+    selected: Cell<Option<bool>>,
 }
 
 impl<'cx> StoredImportAlternative<'cx> {
     /// Get which alternative got selected. `true` for left, `false` for right.
     pub fn get_selected(&self) -> Option<bool> {
-        self.selected.get().copied()
+        self.selected.get()
     }
     /// Get which alternative got selected. `true` for left, `false` for right.
     pub fn unwrap_selected(&self) -> bool {
@@ -239,7 +245,7 @@ impl<'cx> StoredImportAlternative<'cx> {
     }
     /// Set which alternative got selected. `true` for left, `false` for right.
     pub fn set_selected(&self, selected: bool) {
-        let _ = self.selected.set(selected);
+        self.selected.set(Some(selected));
     }
 }
 impl<'cx> Ctxt<'cx> {
@@ -251,7 +257,7 @@ impl<'cx> Ctxt<'cx> {
         let stored = StoredImportAlternative {
             left_imports,
             right_imports,
-            selected: OnceCell::new(),
+            selected: Cell::new(None),
         };
         let id = self.0.import_alternatives.len();
         self.0.import_alternatives.push(Box::new(stored));

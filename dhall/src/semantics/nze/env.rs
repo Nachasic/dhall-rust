@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use crate::semantics::{AlphaVar, Nir, NirKind};
 use crate::Ctxt;
 
@@ -30,7 +32,7 @@ impl NzVar {
         NzVar::Bound(idx)
     }
     pub fn fresh() -> Self {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use core::sync::atomic::{AtomicUsize, Ordering};
         // Global counter to ensure uniqueness of the generated id.
         static FRESH_VAR_COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = FRESH_VAR_COUNTER.fetch_add(1, Ordering::SeqCst);

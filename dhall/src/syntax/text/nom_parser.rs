@@ -17,6 +17,11 @@
 //! 9. Operators (precedence tower)
 //! 10. Top-level expressions (let, lambda, if, etc.)
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use alloc::borrow::ToOwned;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
@@ -58,8 +63,8 @@ fn keyword<'a>(kw: &'static str) -> impl FnMut(&'a str) -> ParseResult<'a, &'a s
 }
 
 /// Insert a record literal entry, merging duplicates with `∧`.
-fn insert_recordlit_entry(map: &mut std::collections::BTreeMap<Label, Expr>, l: Label, e: Expr) {
-    use std::collections::btree_map::Entry;
+fn insert_recordlit_entry(map: &mut alloc::collections::BTreeMap<Label, Expr>, l: Label, e: Expr) {
+    use alloc::collections::btree_map::Entry;
     match map.entry(l) {
         Entry::Vacant(entry) => { entry.insert(e); }
         Entry::Occupied(mut entry) => {
@@ -722,7 +727,7 @@ fn atom(input: &str) -> ParseResult<Expr> {
 // ── 7. Records ───────────────────────────────────────────────────────
 
 fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
     delimited(
         terminated(char('{'), ws),
         |input| {
@@ -788,7 +793,7 @@ fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
         let (rest2, val) = expression(rest2)?;
         // Desugar: { a.b.c = v } → { a = { b = { c = v } } }
         let nested = more_labels.into_iter().rev().fold(val, |inner, l| {
-            let map = std::iter::once((l, inner)).collect();
+            let map = core::iter::once((l, inner)).collect();
             Expr::new(ExprKind::RecordLit(map), Span::Artificial)
         });
         return Ok((rest2, (first_label, '=', nested)));
@@ -854,7 +859,7 @@ fn union_type_entry(input: &str) -> ParseResult<(Label, Option<Expr>)> {
 }
 
 fn union_type(input: &str) -> ParseResult<Expr> {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
     let (rest, _) = terminated(char('<'), ws)(input)?;
     let (rest, _) = opt(terminated(char('|'), ws))(rest)?;
     let (rest, entries) = if let Ok((r, first)) = union_type_entry(rest) {
@@ -897,7 +902,7 @@ fn empty_list_literal(input: &str) -> ParseResult<Expr> {
 
 /// Field access and projection: `e.x`, `e.{ x, y }`, `e.(T)`
 fn selector_expression(input: &str) -> ParseResult<Expr> {
-    use std::collections::BTreeSet;
+    use alloc::collections::BTreeSet;
     let (mut rest, mut expr) = atom(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {

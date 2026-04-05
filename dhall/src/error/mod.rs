@@ -1,5 +1,8 @@
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use std::io::Error as IOError;
+
+use alloc::format;
+use alloc::string::String;
 
 use crate::semantics::resolve::{CyclesStack, ImportLocation};
 use crate::syntax::{Import, ParseError};
@@ -7,7 +10,7 @@ use crate::syntax::{Import, ParseError};
 mod builder;
 pub use builder::*;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub struct Error {
@@ -17,14 +20,14 @@ pub struct Error {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     IO(IOError),
     Parse(ParseError),
     Decode(DecodeError),
     Encode(EncodeError),
     Resolve(ImportError),
     Typecheck(TypeError),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     Cache(CacheError),
 }
 
@@ -36,7 +39,7 @@ pub enum ImportError {
     SanityCheck,
     UnexpectedImport(Import<()>),
     ImportCycle(CyclesStack, ImportLocation),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
     Url(url::ParseError),
 }
 
@@ -63,7 +66,7 @@ pub enum TypeMessage {
     Custom(String),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 #[derive(Debug)]
 pub enum CacheError {
     MissingConfiguration,
@@ -86,8 +89,8 @@ impl TypeError {
     }
 }
 
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         use TypeMessage::*;
         let msg = match &self.message {
             Custom(s) => format!("Type error: {}", s),
@@ -96,10 +99,11 @@ impl std::fmt::Display for TypeError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for TypeError {}
 
-impl std::fmt::Display for EncodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         let msg = match self {
             EncodeError::CBORError(e) => format!("Encode error: {}", e),
         };
@@ -107,31 +111,33 @@ impl std::fmt::Display for EncodeError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for EncodeError {}
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match &self.kind {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
             ErrorKind::IO(err) => write!(f, "{}", err),
             ErrorKind::Parse(err) => write!(f, "{}", err),
             ErrorKind::Decode(err) => write!(f, "{:?}", err),
             ErrorKind::Encode(err) => write!(f, "{:?}", err),
             ErrorKind::Resolve(err) => write!(f, "{:?}", err),
             ErrorKind::Typecheck(err) => write!(f, "{}", err),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
             ErrorKind::Cache(err) => write!(f, "{:?}", err),
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Error {}
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Error {
         Error::new(kind)
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 impl From<IOError> for Error {
     fn from(err: IOError) -> Error {
         ErrorKind::IO(err).into()
@@ -142,7 +148,7 @@ impl From<ParseError> for Error {
         ErrorKind::Parse(err).into()
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 impl From<url::ParseError> for Error {
     fn from(err: url::ParseError) -> Error {
         ErrorKind::Resolve(ImportError::Url(err)).into()
@@ -168,7 +174,7 @@ impl From<TypeError> for Error {
         ErrorKind::Typecheck(err).into()
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 impl From<CacheError> for Error {
     fn from(err: CacheError) -> Error {
         ErrorKind::Cache(err).into()

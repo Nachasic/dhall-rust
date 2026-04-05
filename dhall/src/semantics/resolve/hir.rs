@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::error::TypeError;
 use crate::semantics::{type_with, typecheck, NameEnv, Nir, NzEnv, Tir, TyEnv};
 use crate::syntax::{Expr, ExprKind, Span, V};
@@ -147,9 +149,9 @@ fn hir_to_expr<'cx>(
     Expr::new(kind, hir.span())
 }
 
-impl<'cx> std::cmp::PartialEq for Hir<'cx> {
+impl<'cx> core::cmp::PartialEq for Hir<'cx> {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
     }
 }
-impl<'cx> std::cmp::Eq for Hir<'cx> {}
+impl<'cx> core::cmp::Eq for Hir<'cx> {}

@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::error::Error;
 
 // Compute the sha256 hash of a bitstring.
@@ -6,7 +8,7 @@ pub fn sha256_hash(data: &[u8]) -> Box<[u8]> {
     sha2::Sha256::digest(data).as_slice().into()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 pub fn read_binary_file(path: impl AsRef<std::path::Path>) -> Result<Box<[u8]>, Error> {
     use std::io::Read;
     let mut buffer = Vec::new();

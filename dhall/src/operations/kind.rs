@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use crate::syntax::{trivial_result, Label};
 

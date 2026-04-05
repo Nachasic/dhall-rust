@@ -1,15 +1,15 @@
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use url::Url;
 
 use crate::error::Error;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use crate::semantics::resolve::{download_http_text, ImportLocation};
 use crate::syntax::{binary, parse_expr};
 use crate::Parsed;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 pub fn parse_file(f: &Path) -> Result<Parsed, Error> {
     let path = crate::resolve::resolve_home(f)?;
     let text = std::fs::read_to_string(path)?;
@@ -18,7 +18,7 @@ pub fn parse_file(f: &Path) -> Result<Parsed, Error> {
     Ok(Parsed(expr, root))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 pub fn parse_remote(url: Url) -> Result<Parsed, Error> {
     let body = download_http_text(url.clone())?;
     let expr = parse_expr(&body)?;
@@ -38,7 +38,7 @@ pub fn parse_binary(data: &[u8]) -> Result<Parsed, Error> {
     Ok(Parsed(expr, root))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 pub fn parse_binary_file(f: &Path) -> Result<Parsed, Error> {
     let data = crate::utils::read_binary_file(f)?;
     let expr = binary::decode(&data)?;
