@@ -1,6 +1,1 @@
 Type error: error: BinOpTypeMismatch
- --> <current file>:1:1
-  |
-1 | "" ++ 1
-  | ^^^^^^^ BinOpTypeMismatch
-  |

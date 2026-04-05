@@ -1,1 +1,1 @@
-< foo: ./"example|" bar : ./example >
+< bar: ./example | foo: ./example >

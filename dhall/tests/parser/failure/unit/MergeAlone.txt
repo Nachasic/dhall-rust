@@ -1,6 +1,1 @@
- --> 2:1
-  |
-2 | 
-  | ^---
-  |
-  = expected import_hashed or primitive_expression
+Parse error: Error(Error { input: "merge\n", code: Tag })

@@ -1,6 +1,1 @@
- --> 1:49
-  |
-1 | (https://example.com/foo using ./headers) sha256:0000000000000000000000000000000000000000000000000000000000000000
-  |                                                 ^---
-  |
-  = expected EOI, import_alt, bool_or, natural_plus, text_append, list_append, bool_and, natural_times, bool_eq, bool_ne, combine, combine_types, equivalent, prefer, or arrow
+Parse error: Error(Error { input: "(https://example.com/foo using ./headers) sha256:0000000000000000000000000000000000000000000000000000000000000000\n", code: TakeWhile1 })

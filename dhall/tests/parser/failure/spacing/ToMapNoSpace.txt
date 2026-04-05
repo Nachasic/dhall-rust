@@ -1,6 +1,1 @@
- --> 1:1
-  |
-1 | toMap(x)
-  | ^---
-  |
-  = expected expression
+Parse error: Error(Error { input: "toMap(x)\n", code: Tag })

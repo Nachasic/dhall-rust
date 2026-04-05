@@ -1,6 +1,1 @@
- --> 1:1
-  |
-1 | Some(x)
-  | ^---
-  |
-  = expected expression
+Unexpected trailing input: "(x)\n"

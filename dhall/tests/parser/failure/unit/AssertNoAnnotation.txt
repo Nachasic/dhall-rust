@@ -1,6 +1,1 @@
- --> 1:1
-  |
-1 | assert
-  | ^---
-  |
-  = expected expression
+Parse error: Error(Error { input: "assert\n", code: Tag })

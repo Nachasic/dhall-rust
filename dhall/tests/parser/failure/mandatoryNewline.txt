@@ -1,6 +1,1 @@
- --> 2:1
-  |
-2 | ''ABC''
-  | ^---
-  |
-  = expected expression
+Parse error: Error(Error { input: "''ABC''\n", code: TakeWhile1 })

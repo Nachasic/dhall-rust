@@ -1,6 +1,1 @@
- --> 1:1
-  |
-1 | if(b) then x else y
-  | ^---
-  |
-  = expected expression
+Parse error: Error(Error { input: "if(b) then x else y\n", code: Tag })

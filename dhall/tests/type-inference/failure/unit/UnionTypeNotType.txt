@@ -1,6 +1,1 @@
 Type error: error: InvalidVariantType
- --> <current file>:1:7
-  |
-1 | < x : True >
-  |       ^^^^ InvalidVariantType
-  |

@@ -1,6 +1,1 @@
- --> 1:4
-  |
-1 | x +y
-  |    ^---
-  |
-  = expected natural_literal
+Unexpected trailing input: "+y\n"

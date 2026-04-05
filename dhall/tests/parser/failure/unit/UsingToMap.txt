@@ -1,6 +1,1 @@
- --> 8:27
-  |
-8 | https://example.com using toMap { Foo = "Bar" }
-  |                           ^---
-  |
-  = expected import_hashed or primitive_expression
+Unexpected trailing input: "using toMap { Foo = \"Bar\" }\n"

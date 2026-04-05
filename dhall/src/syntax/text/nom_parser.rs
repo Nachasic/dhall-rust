@@ -1949,4 +1949,16 @@ mod tests {
         let e = parse_expr("{ =, }");
         assert!(e.is_ok(), "empty record with trailing comma: {:?}", e.err());
     }
+
+    #[test]
+    fn test_keyword_as_record_field_rejected() {
+        // Keywords must not be used as bare record field names
+        assert!(parse_expr("{ if: Text }").is_err(), "if should be rejected");
+        assert!(parse_expr("{ merge: Text }").is_err(), "merge should be rejected");
+        assert!(parse_expr("{ with: Text }").is_err(), "with should be rejected");
+        // But backtick-quoted keywords are fine
+        assert!(parse_expr("{ `if`: Text }").is_ok(), "`if` should be allowed");
+        // Some is explicitly allowed
+        assert!(parse_expr("{ Some: Text }").is_ok(), "Some should be allowed");
+    }
 }

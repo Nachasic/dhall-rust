@@ -1,6 +1,1 @@
- --> 1:3
-  |
-1 | < x :T >
-  |   ^---
-  |
-  = expected missing, if_, merge, NaN, Some_, toMap, assert, or forall_keyword
+Parse error: Error(Error { input: "< x :T >\n", code: TakeWhile1 })

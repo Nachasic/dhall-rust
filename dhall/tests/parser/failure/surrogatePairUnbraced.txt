@@ -1,6 +1,1 @@
- --> 5:3
-  |
-5 | "\uD800"
-  |   ^---^
-  |
-  = Escape sequences can't contain surrogate pairs
+Parse error: Error(Error { input: "\"\\uD800\"\n", code: TakeWhile1 })
