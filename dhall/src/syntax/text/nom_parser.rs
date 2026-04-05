@@ -44,7 +44,8 @@ fn mkexpr(kind: UnspannedExpr) -> Expr {
 
 // ── 1. Whitespace and comments ───────────────────────────────────────
 
-/// Skip whitespace and line comments (-- to end of line).
+/// Skip whitespace and line comments (-- to end of line)
+/// and block comments ({- ... -}, which can nest).
 fn ws(input: &str) -> ParseResult<()> {
     let mut rest = input;
     loop {
@@ -53,11 +54,41 @@ fn ws(input: &str) -> ParseResult<()> {
         if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("--")(rest) {
             let (r, _) = take_while(|c: char| c != '\n')(r)?;
             rest = r;
+        } else if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("{-")(rest) {
+            rest = block_comment(r)?;
         } else {
             break;
         }
     }
     Ok((rest, ()))
+}
+
+/// Consume the body of a block comment (after the opening `{-`).
+/// Handles nesting: each `{-` inside must be matched by a `-}`.
+fn block_comment(input: &str) -> Result<&str, nom::Err<nom::error::Error<&str>>> {
+    let mut rest = input;
+    loop {
+        // Look for {- (nested) or -} (close)
+        match rest.find("{-").map(|i| (i, true)).into_iter()
+            .chain(rest.find("-}").map(|i| (i, false)))
+            .min_by_key(|(i, _)| *i)
+        {
+            Some((i, true)) => {
+                // Nested block comment — recurse past the `{-`
+                rest = block_comment(&rest[i + 2..])?;
+            }
+            Some((i, false)) => {
+                // Closing -}
+                return Ok(&rest[i + 2..]);
+            }
+            None => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Tag,
+                )));
+            }
+        }
+    }
 }
 
 /// Wrap a parser to consume trailing whitespace.
@@ -657,6 +688,30 @@ mod tests {
     fn test_line_comment_at_end() {
         let e = parse_expr("42 -- trailing comment").unwrap();
         assert_eq!(e.to_string(), "42");
+    }
+
+    #[test]
+    fn test_block_comment() {
+        let e = parse_expr("{- a comment -} 42").unwrap();
+        assert_eq!(e.to_string(), "42");
+    }
+
+    #[test]
+    fn test_block_comment_inline() {
+        let e = parse_expr("1 {- plus -} + 2").unwrap();
+        assert_eq!(e.to_string(), "1 + 2");
+    }
+
+    #[test]
+    fn test_block_comment_nested() {
+        let e = parse_expr("{- outer {- inner -} still outer -} True").unwrap();
+        assert_eq!(e.to_string(), "True");
+    }
+
+    #[test]
+    fn test_block_comment_multiline() {
+        let e = parse_expr("{-\n  multi\n  line\n-} 1 + 2").unwrap();
+        assert_eq!(e.to_string(), "1 + 2");
     }
 
     // ── String tests ─────────────────────────────────────────────
