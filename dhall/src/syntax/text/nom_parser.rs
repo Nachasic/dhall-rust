@@ -1,9 +1,7 @@
-//! Dhall parser built on `nom` — a `no_std`-compatible alternative to the
-//! `pest`-based parser in `parser.rs`.
+//! Dhall parser built on `nom`.
 //!
 //! Follows the [Dhall ABNF grammar](https://github.com/dhall-lang/dhall-lang/blob/master/standard/dhall.abnf)
-//! and produces the same `Expr` AST as the `pest` parser.
-//! Passes all 1937 spec tests.
+//! and produces the `Expr` AST. Passes all 1937 spec tests.
 //!
 //! # Structure
 //!
@@ -40,7 +38,7 @@ use crate::syntax::{Const, FilePath, FilePrefix, Hash, ImportMode, ImportTarget,
 
 type ParseResult<'a, T> = IResult<&'a str, T>;
 
-/// Error type compatible with the pest parser's public API.
+/// Error type for the public API.
 pub type ParseError = String;
 
 fn mkexpr(kind: UnspannedExpr) -> Expr {

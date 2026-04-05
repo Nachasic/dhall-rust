@@ -8,7 +8,7 @@
 mod ast;
 pub use crate::syntax::ast::visitor;
 pub use crate::syntax::ast::*;
-// Default: nom parser. Switch to pest parser::* for pest-based builds.
+// Default: nom parser.
 pub use crate::syntax::text::nom_parser::{parse_expr, ParseError};
 pub mod binary;
 pub mod text;

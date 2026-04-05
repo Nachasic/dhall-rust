@@ -43,14 +43,6 @@ impl ParsedSpan {
 }
 
 impl Span {
-    pub fn make(input: Rc<str>, sp: pest::Span) -> Self {
-        Span::Parsed(ParsedSpan {
-            input,
-            start: sp.start(),
-            end: sp.end(),
-        })
-    }
-
     /// Takes the union of the two spans, i.e. the range of input covered by the two spans plus any
     /// input between them. Assumes that the spans come from the same input. Fails if one of the
     /// spans does not point to an input location.
