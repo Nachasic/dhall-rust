@@ -400,12 +400,22 @@ fn path_component(input: &str) -> ParseResult<String> {
 }
 
 /// Local path: ./foo/bar.dhall, ../foo, /abs/path, ~/home/path
+/// Match `/` as absolute path prefix, but not `/\` or `//` (which are operators).
+fn absolute_path_prefix(input: &str) -> ParseResult<FilePrefix> {
+    let (rest, _) = char('/')(input)?;
+    if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with(' ') {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    } else {
+        Ok((rest, FilePrefix::Absolute))
+    }
+}
+
 fn local_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     let (rest, prefix) = alt((
         value(FilePrefix::Parent, tag("../")),
         value(FilePrefix::Here, tag("./")),
         value(FilePrefix::Home, tag("~/")),
-        value(FilePrefix::Absolute, tag("/")),
+        absolute_path_prefix,
     ))(input)?;
 
     // For absolute paths, the first / was consumed by the prefix.
@@ -568,10 +578,15 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
         alt((
             // { = } — empty record literal
             map(lexeme(char('=')), |_| mkexpr(ExprKind::RecordLit(Default::default()))),
-            // Non-empty record
+            // Non-empty record (with optional leading/trailing commas)
             map(
-                separated_list0(lexeme(char(',')), record_entry),
-                |entries| {
+                |input| {
+                    let (rest, _) = opt(lexeme(char(',')))(input)?; // optional leading comma
+                    let (rest, entries) = separated_list0(lexeme(char(',')), record_entry)(rest)?;
+                    let (rest, _) = opt(lexeme(char(',')))(rest)?; // optional trailing comma
+                    Ok((rest, entries))
+                },
+                |entries: Vec<(Label, char, Expr)>| {
                     if entries.is_empty() {
                         return mkexpr(ExprKind::RecordType(Default::default()));
                     }
@@ -627,12 +642,14 @@ fn list_literal(input: &str) -> ParseResult<Expr> {
     delimited(
         lexeme(char('[')),
         map(
-            separated_list0(lexeme(char(',')), expression),
+            |input| {
+                let (rest, _) = opt(lexeme(char(',')))(input)?;
+                let (rest, items) = separated_list0(lexeme(char(',')), expression)(rest)?;
+                let (rest, _) = opt(lexeme(char(',')))(rest)?;
+                Ok((rest, items))
+            },
             |items| {
                 if items.is_empty() {
-                    // Empty list needs a type annotation — this will be
-                    // handled at a higher level. For now, produce NEListLit
-                    // which will fail if truly empty.
                     mkexpr(ExprKind::NEListLit(items))
                 } else {
                     mkexpr(ExprKind::NEListLit(items))
@@ -650,11 +667,15 @@ fn union_type(input: &str) -> ParseResult<Expr> {
     delimited(
         lexeme(char('<')),
         map(
-            separated_list0(
-                lexeme(char('|')),
-                pair(label, opt(preceded(lexeme(char(':')), expression))),
-            ),
-            |entries| {
+            |input| {
+                let (rest, _) = opt(lexeme(char('|')))(input)?; // optional leading |
+                let (rest, entries) = separated_list0(
+                    lexeme(char('|')),
+                    pair(label, opt(preceded(lexeme(char(':')), expression))),
+                )(rest)?;
+                Ok((rest, entries))
+            },
+            |entries: Vec<(Label, Option<Expr>)>| {
                 let map: BTreeMap<_, _> = entries.into_iter().collect();
                 mkexpr(ExprKind::UnionType(map))
             },
@@ -683,11 +704,16 @@ fn selector_expression(input: &str) -> ParseResult<Expr> {
         let tried = (|| -> ParseResult<Expr> {
             let (r, _) = lexeme(char('.'))(rest)?;
             let (r, sel) = alt((
-                // .{ x, y } — projection
+                // .{ x, y } — projection (with optional leading comma)
                 map(
                     delimited(
                         lexeme(char('{')),
-                        separated_list0(lexeme(char(',')), label),
+                        |input| {
+                            let (rest, _) = opt(lexeme(char(',')))(input)?;
+                            let (rest, ls) = separated_list0(lexeme(char(',')), label)(rest)?;
+                            let (rest, _) = opt(lexeme(char(',')))(rest)?;
+                            Ok((rest, ls))
+                        },
                         lexeme(char('}')),
                     ),
                     |ls| {
@@ -847,11 +873,84 @@ binop_level!(text_append_expr,             plus_expr,          "++" => TextAppen
 binop_level!(plus_expr,                    list_append_expr,   "+" => NaturalPlus);
 binop_level!(list_append_expr,             and_expr,           "#" => ListAppend);
 binop_level!(and_expr,                     combine_expr,       "&&" => BoolAnd);
-binop_level!(combine_expr,                 prefer_expr,        "∧" => RecursiveRecordMerge, "/\\" => RecursiveRecordMerge);
-binop_level!(prefer_expr,                  combine_types_expr, "⫽" => RightBiasedRecordMerge);
-binop_level!(combine_types_expr,           times_expr,         "⩓" => RecursiveRecordTypeMerge);
 binop_level!(times_expr,                   bool_eq_expr,       "*" => NaturalTimes);
 binop_level!(ne_expr,                      application,        "!=" => BoolNE);
+
+// combine, prefer, combine_types need hand-written parsers because
+// /\ vs // vs //\\ are ambiguous prefixes.
+
+fn combine_expr(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut lhs) = prefer_expr(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = ws(rest)?;
+            let (r, _) = alt((tag("∧"), tag("/\\")))(r)?;
+            let (r, _) = ws(r)?;
+            let (r, rhs) = prefer_expr(r)?;
+            Ok((r, rhs))
+        })();
+        match tried {
+            Ok((r, rhs)) => {
+                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RecursiveRecordMerge, lhs, rhs)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, lhs))
+}
+
+/// Match `//` but not `//\\`
+fn op_prefer_ascii(input: &str) -> ParseResult<&str> {
+    let (rest, _) = tag("//")(input)?;
+    if rest.starts_with('\\') {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    } else {
+        Ok((rest, "//"))
+    }
+}
+
+fn prefer_expr(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut lhs) = combine_types_expr(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = ws(rest)?;
+            let (r, _) = alt((tag("⫽"), op_prefer_ascii))(r)?;
+            let (r, _) = ws(r)?;
+            let (r, rhs) = combine_types_expr(r)?;
+            Ok((r, rhs))
+        })();
+        match tried {
+            Ok((r, rhs)) => {
+                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RightBiasedRecordMerge, lhs, rhs)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, lhs))
+}
+
+fn combine_types_expr(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut lhs) = times_expr(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = ws(rest)?;
+            let (r, _) = alt((tag("⩓"), tag("//\\\\")))(r)?;
+            let (r, _) = ws(r)?;
+            let (r, rhs) = times_expr(r)?;
+            Ok((r, rhs))
+        })();
+        match tried {
+            Ok((r, rhs)) => {
+                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(RecursiveRecordTypeMerge, lhs, rhs)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, lhs))
+}
 
 /// `==` level needs special handling to not consume `===`.
 fn bool_eq_expr(input: &str) -> ParseResult<Expr> {
@@ -1014,6 +1113,12 @@ pub fn expression(input: &str) -> ParseResult<Expr> {
 
 /// Entry point: parse a complete Dhall expression.
 pub fn parse_expr(input: &str) -> Result<Expr, String> {
+    // Skip shebang line if present.
+    let input = if input.starts_with("#!") {
+        input.find('\n').map_or("", |i| &input[i + 1..])
+    } else {
+        input
+    };
     match expression(input.trim()) {
         Ok(("", expr)) => Ok(expr),
         Ok((rest, _)) => Err(format!("Unexpected trailing input: {:?}", rest)),
