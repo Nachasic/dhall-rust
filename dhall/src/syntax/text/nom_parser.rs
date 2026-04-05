@@ -541,7 +541,11 @@ fn atom(input: &str) -> ParseResult<Expr> {
         map(single_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
         // Record literal/type: { ... }
         record_literal_or_type,
+        // Union type: < ... >
+        union_type,
         // List literal: [ ... ]
+        // Empty list with type annotation must come before non-empty
+        empty_list_literal,
         list_literal,
         // Imports (before builtins/variables — `missing`, `env:` look like identifiers)
         import_expr,
@@ -612,12 +616,124 @@ fn list_literal(input: &str) -> ParseResult<Expr> {
     )(input)
 }
 
-// ── 8. Application ───────────────────────────────────────────────────
+// ── 7b. Union types ──────────────────────────────────────────────────
+
+fn union_type(input: &str) -> ParseResult<Expr> {
+    use std::collections::BTreeMap;
+    delimited(
+        lexeme(char('<')),
+        map(
+            separated_list0(
+                lexeme(char('|')),
+                pair(label, opt(preceded(lexeme(char(':')), expression))),
+            ),
+            |entries| {
+                let map: BTreeMap<_, _> = entries.into_iter().collect();
+                mkexpr(ExprKind::UnionType(map))
+            },
+        ),
+        lexeme(char('>')),
+    )(input)
+}
+
+// ── 7c. Empty list with type ─────────────────────────────────────────
+
+fn empty_list_literal(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(char('['))(input)?;
+    let (rest, _) = lexeme(char(']'))(rest)?;
+    let (rest, _) = lexeme(char(':'))(rest)?;
+    let (rest, ty) = expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::EmptyListLit(ty))))
+}
+
+// ── 8. Selector, completion, application ─────────────────────────────
+
+/// Field access and projection: `e.x`, `e.{ x, y }`, `e.(T)`
+fn selector_expression(input: &str) -> ParseResult<Expr> {
+    use std::collections::BTreeSet;
+    let (mut rest, mut expr) = atom(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = lexeme(char('.'))(rest)?;
+            let (r, sel) = alt((
+                // .{ x, y } — projection
+                map(
+                    delimited(
+                        lexeme(char('{')),
+                        separated_list0(lexeme(char(',')), label),
+                        lexeme(char('}')),
+                    ),
+                    |ls| {
+                        let set: BTreeSet<_> = ls.into_iter().collect();
+                        mkexpr(ExprKind::Op(crate::operations::OpKind::Projection(expr.clone(), set)))
+                    },
+                ),
+                // .(T) — projection by expression
+                map(
+                    delimited(lexeme(char('(')), expression, lexeme(char(')'))),
+                    |e| mkexpr(ExprKind::Op(crate::operations::OpKind::ProjectionByExpr(expr.clone(), e))),
+                ),
+                // .field — field access
+                map(label, |l| {
+                    mkexpr(ExprKind::Op(crate::operations::OpKind::Field(expr.clone(), l)))
+                }),
+            ))(r)?;
+            Ok((r, sel))
+        })();
+        match tried {
+            Ok((r, e)) => { expr = e; rest = r; }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, expr))
+}
+
+/// Completion: `T::r`
+fn completion_expression(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut expr) = selector_expression(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = lexeme(tag("::"))(rest)?;
+            let (r, rhs) = selector_expression(r)?;
+            Ok((r, mkexpr(ExprKind::Op(crate::operations::OpKind::Completion(expr.clone(), rhs)))))
+        })();
+        match tried {
+            Ok((r, e)) => { expr = e; rest = r; }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, expr))
+}
+
+/// Keyword-prefixed application: `Some e`, `merge x y`, `toMap x`
+fn first_application(input: &str) -> ParseResult<Expr> {
+    alt((
+        // Some e
+        map(
+            preceded(pair(lexeme(tag("Some")), ws), completion_expression),
+            |e| mkexpr(ExprKind::SomeLit(e)),
+        ),
+        // merge x y (without type annotation — that's at expression level)
+        |input| {
+            let (rest, _) = lexeme(tag("merge"))(input)?;
+            let (rest, x) = completion_expression(rest)?;
+            let (rest, y) = completion_expression(rest)?;
+            Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, None)))))
+        },
+        // toMap x (without type annotation)
+        |input| {
+            let (rest, _) = lexeme(tag("toMap"))(input)?;
+            let (rest, x) = completion_expression(rest)?;
+            Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, None)))))
+        },
+        completion_expression,
+    ))(input)
+}
 
 /// Function application: `f a b` = `App(App(f, a), b)`
 fn application(input: &str) -> ParseResult<Expr> {
-    let (rest, first) = atom(input)?;
-    let (rest, args) = many0(atom)(rest)?;
+    let (rest, first) = first_application(input)?;
+    let (rest, args) = many0(completion_expression)(rest)?;
     Ok((
         rest,
         args.into_iter().fold(first, |acc, arg| {
@@ -784,8 +900,70 @@ fn forall_expression(input: &str) -> ParseResult<Expr> {
     Ok((rest, mkexpr(ExprKind::Pi(name, ty, body))))
 }
 
+fn assert_expression(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(tag("assert"))(input)?;
+    let (rest, _) = lexeme(char(':'))(rest)?;
+    let (rest, e) = expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::Assert(e))))
+}
+
+/// `merge x y : T` (with type annotation — without is in first_application)
+fn merge_annot_expression(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(tag("merge"))(input)?;
+    let (rest, x) = completion_expression(rest)?;
+    let (rest, y) = completion_expression(rest)?;
+    let (rest, _) = lexeme(char(':'))(rest)?;
+    let (rest, ty) = expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, Some(ty))))))
+}
+
+/// `toMap x : T` (with type annotation — without is in first_application)
+fn tomap_annot_expression(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(tag("toMap"))(input)?;
+    let (rest, x) = completion_expression(rest)?;
+    let (rest, _) = lexeme(char(':'))(rest)?;
+    let (rest, ty) = expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, Some(ty))))))
+}
+
+/// `with` expression: `e with a.b.c = v`
+fn with_expression(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut expr) = operator_expression(input)?;
+    loop {
+        let tried = (|| -> ParseResult<(Vec<Label>, Expr)> {
+            let (r, _) = lexeme(tag("with"))(rest)?;
+            let (r, labels) = separated_list0(lexeme(char('.')), label)(r)?;
+            let (r, _) = lexeme(char('='))(r)?;
+            let (r, val) = operator_expression(r)?;
+            Ok((r, (labels, val)))
+        })();
+        match tried {
+            Ok((r, (labels, val))) => {
+                expr = mkexpr(ExprKind::Op(crate::operations::OpKind::With(expr, labels, val)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, expr))
+}
+
+/// Arrow type: `A -> B` (non-dependent function type)
+fn arrow_expression(input: &str) -> ParseResult<Expr> {
+    let (rest, lhs) = with_expression(input)?;
+    let tried = (|| -> ParseResult<Expr> {
+        let (r, _) = lexeme(alt((tag("->"), tag("→"))))(rest)?;
+        let (r, rhs) = expression(r)?;
+        Ok((r, mkexpr(ExprKind::Pi("_".into(), lhs.clone(), rhs))))
+    })();
+    match tried {
+        Ok((r, e)) => Ok((r, e)),
+        Err(_) => Ok((rest, lhs)),
+    }
+}
+
 fn annot_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, e) = operator_expression(input)?;
+    let (rest, e) = arrow_expression(input)?;
     let (rest, annot) = opt(preceded(lexeme(char(':')), expression))(rest)?;
     match annot {
         Some(ty) => Ok((rest, mkexpr(ExprKind::Annot(e, ty)))),
@@ -800,6 +978,9 @@ pub fn expression(input: &str) -> ParseResult<Expr> {
         let_expression,
         if_expression,
         forall_expression,
+        assert_expression,
+        merge_annot_expression,
+        tomap_annot_expression,
         annot_expression,
     )))(input)
 }
@@ -1048,6 +1229,89 @@ mod tests {
         let e = parse_expr("let config = ./config.dhall in config").unwrap();
         let s = e.to_string();
         assert!(s.contains("let") && s.contains("config"), "got: {}", s);
+    }
+
+    // ── Expression tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_some() {
+        let e = parse_expr("Some 42").unwrap();
+        assert_eq!(e.to_string(), "Some 42");
+    }
+
+    #[test]
+    fn test_merge() {
+        let e = parse_expr("merge { a = True } x").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("merge"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_merge_with_type() {
+        let e = parse_expr("merge { a = True } x : Bool").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("merge") && s.contains("Bool"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_tomap() {
+        let e = parse_expr("toMap { a = 1 }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("toMap"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_assert() {
+        let e = parse_expr("assert : True === True").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("assert"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_field_access() {
+        let e = parse_expr("x.y").unwrap();
+        assert_eq!(e.to_string(), "x.y");
+    }
+
+    #[test]
+    fn test_nested_field_access() {
+        let e = parse_expr("x.y.z").unwrap();
+        assert_eq!(e.to_string(), "x.y.z");
+    }
+
+    #[test]
+    fn test_projection() {
+        let e = parse_expr("x.{ a, b }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("a") && s.contains("b"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_union_type() {
+        let e = parse_expr("< A | B : Natural >").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("A") && s.contains("B") && s.contains("Natural"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_empty_list_with_type() {
+        let e = parse_expr("[] : List Natural").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("List") && s.contains("Natural"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_with() {
+        let e = parse_expr("x with a.b = 1").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("with"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_arrow_type() {
+        let e = parse_expr("Natural -> Text").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("Natural") && s.contains("Text"), "got: {}", s);
     }
 
     #[test]
