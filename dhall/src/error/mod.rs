@@ -36,6 +36,7 @@ pub enum ImportError {
     SanityCheck,
     UnexpectedImport(Import<()>),
     ImportCycle(CyclesStack, ImportLocation),
+    #[cfg(not(target_arch = "wasm32"))]
     Url(url::ParseError),
 }
 
@@ -141,6 +142,7 @@ impl From<ParseError> for Error {
         ErrorKind::Parse(err).into()
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl From<url::ParseError> for Error {
     fn from(err: url::ParseError) -> Error {
         ErrorKind::Resolve(ImportError::Url(err)).into()

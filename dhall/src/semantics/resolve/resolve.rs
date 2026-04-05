@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use url::Url;
 
 use crate::builtins::Builtin;
@@ -29,6 +30,7 @@ pub enum ImportLocationKind {
     /// Local file
     Local(PathBuf),
     /// Remote file
+    #[cfg(not(target_arch = "wasm32"))]
     Remote(Url),
     /// Environment variable
     Env(String),
@@ -346,7 +348,7 @@ pub(crate) fn download_http_text(_url: Url) -> Result<String, Error> {
     panic!("Remote imports are disabled in this build of dhall-rust")
 }
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn download_http_text(_url: Url) -> Result<String, Error> {
+pub(crate) fn download_http_text(_url: String) -> Result<String, Error> {
     panic!("Remote imports are not supported on wasm yet")
 }
 

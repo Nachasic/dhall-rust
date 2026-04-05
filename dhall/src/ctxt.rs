@@ -1,8 +1,38 @@
-use elsa::vec::FrozenVec;
+use std::cell::RefCell;
 use once_cell::sync::OnceCell;
 use std::marker::PhantomData;
 use std::ops::{Deref, Index};
 use std::sync::Arc;
+
+/// Append-only vector that allows pushing through a shared reference.
+/// Items are boxed so references to them remain stable.
+/// Replacement for `elsa::vec::AppendVec` that doesn't require `std`-only deps.
+struct AppendVec<T> {
+    inner: RefCell<Vec<T>>,
+}
+
+impl<T> AppendVec<T> {
+    fn new() -> Self {
+        AppendVec { inner: RefCell::new(Vec::new()) }
+    }
+    fn len(&self) -> usize {
+        self.inner.borrow().len()
+    }
+    fn push(&self, val: T) {
+        self.inner.borrow_mut().push(val);
+    }
+}
+
+impl<T> Index<usize> for AppendVec<Box<T>> {
+    type Output = T;
+    fn index(&self, idx: usize) -> &T {
+        let borrow = self.inner.borrow();
+        let ptr: *const T = &**borrow.index(idx);
+        // SAFETY: Items are boxed (heap-allocated) and never removed or moved,
+        // so the pointer remains valid for the lifetime of the AppendVec.
+        unsafe { &*ptr }
+    }
+}
 
 use crate::semantics::{Import, ImportLocation, ImportNode, Nir};
 use crate::syntax::Span;
@@ -25,18 +55,18 @@ pub trait CustomBuiltinHandler<'cx> {
 
 /// Implementation detail. Made public for the `Index` instances.
 pub struct CtxtS<'cx> {
-    imports: FrozenVec<Box<StoredImport<'cx>>>,
-    import_alternatives: FrozenVec<Box<StoredImportAlternative<'cx>>>,
-    import_results: FrozenVec<Box<StoredImportResult<'cx>>>,
+    imports: AppendVec<Box<StoredImport<'cx>>>,
+    import_alternatives: AppendVec<Box<StoredImportAlternative<'cx>>>,
+    import_results: AppendVec<Box<StoredImportResult<'cx>>>,
     custom_builtins: Vec<CustomBuiltinEntry>,
 }
 
 impl<'cx> Default for CtxtS<'cx> {
     fn default() -> Self {
         CtxtS {
-            imports: FrozenVec::new(),
-            import_alternatives: FrozenVec::new(),
-            import_results: FrozenVec::new(),
+            imports: AppendVec::new(),
+            import_alternatives: AppendVec::new(),
+            import_results: AppendVec::new(),
             custom_builtins: Vec::new(),
         }
     }
@@ -95,7 +125,7 @@ where
     }
 }
 
-/// Empty impl, because `FrozenVec` does not implement `Debug` and I can't be bothered to do it
+/// Empty impl, because `AppendVec` does not implement `Debug` and I can't be bothered to do it
 /// myself.
 impl<'cx> std::fmt::Debug for Ctxt<'cx> {
     fn fmt(&self, _: &mut std::fmt::Formatter) -> std::fmt::Result {
