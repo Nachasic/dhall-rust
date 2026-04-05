@@ -550,7 +550,7 @@ fn local_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     Ok((rest, ImportTarget::Local(prefix, FilePath { file_path: components })))
 }
 
-/// HTTP(S) import: https://example.com/foo/bar.dhall
+/// HTTP(S) import: https://example.com/foo/bar.dhall [using headers]
 fn http_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     let (rest, scheme) = alt((
         value(Scheme::HTTPS, tag("https://")),
@@ -573,12 +573,21 @@ fn http_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
         map(take_while(|c: char| c != ' ' && c != '\n' && c != '\r'), |s: &str| s.to_owned()),
     ))(rest)?;
 
+    // Optional headers: using import-expression
+    let (rest, headers) = opt(|input| {
+        let (r, _) = ws(input)?;
+        let (r, _) = keyword("using")(r)?;
+        let (r, _) = ws1(r)?;
+        let (r, e) = import_expression(r)?;
+        Ok((r, e))
+    })(rest)?;
+
     Ok((rest, ImportTarget::Remote(URL {
         scheme,
         authority,
         path: FilePath { file_path },
         query,
-        headers: None,
+        headers,
     })))
 }
 
