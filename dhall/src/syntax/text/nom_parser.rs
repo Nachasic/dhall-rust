@@ -181,7 +181,9 @@ fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
                 digit1,
                 opt(recognize(tuple((one_of("eE"), opt(one_of("+-")), digit1)))),
             ))),
-            |s: &str| s.parse::<f64>().map(NaiveDouble::from),
+            |s: &str| s.parse::<f64>()
+                .map_err(|e| format!("{}", e))
+                .and_then(|f| if f.is_infinite() { Err("out of range".to_owned()) } else { Ok(NaiveDouble::from(f)) }),
         ),
         // Without dot: 1e4, -1E+5
         map_res(
@@ -192,9 +194,17 @@ fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
                 opt(one_of("+-")),
                 digit1,
             ))),
-            |s: &str| s.parse::<f64>().map(NaiveDouble::from),
+            |s: &str| s.parse::<f64>()
+                .map_err(|e| format!("{}", e))
+                .and_then(|f| if f.is_infinite() { Err("out of range".to_owned()) } else { Ok(NaiveDouble::from(f)) }),
         ),
     ))(input)
+}
+
+/// Check if a Unicode codepoint is a non-character (per Dhall spec).
+fn is_noncharacter(n: u32) -> bool {
+    // Non-characters: 0xNFFFE and 0xNFFFF for each plane 0-16
+    (n & 0xFFFE) == 0xFFFE
 }
 
 /// Double-quoted string escape sequence.
@@ -216,6 +226,7 @@ fn double_quote_escaped(input: &str) -> ParseResult<String> {
                 delimited(char('{'), take_while1(|c: char| c.is_ascii_hexdigit()), char('}')),
                 |s: &str| u32::from_str_radix(s, 16)
                     .map_err(|e| format!("{}", e))
+                    .and_then(|n| if is_noncharacter(n) { Err("non-character".to_owned()) } else { Ok(n) })
                     .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
                     .map(|c| c.to_string()),
             ),
@@ -229,6 +240,7 @@ fn double_quote_escaped(input: &str) -> ParseResult<String> {
                 ))),
                 |s: &str| u32::from_str_radix(s, 16)
                     .map_err(|e| format!("{}", e))
+                    .and_then(|n| if is_noncharacter(n) { Err("non-character".to_owned()) } else { Ok(n) })
                     .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
                     .map(|c| c.to_string()),
             ),
@@ -366,9 +378,15 @@ fn single_quote_literal(input: &str) -> ParseResult<InterpolatedText<Expr>> {
 /// Reserved words that cannot be used as labels.
 const RESERVED: &[&str] = &[
     "if", "then", "else", "let", "in", "using", "missing", "as",
-    "Infinity", "NaN", "merge", "toMap", "assert", "forall",
+    "Infinity", "NaN", "merge", "Some", "toMap", "assert", "forall",
     "with",
 ];
+
+/// Check if a name is a builtin or constant (True, False, Type, Kind, Sort, or Builtin::parse).
+fn is_builtin_name(name: &str) -> bool {
+    matches!(name, "True" | "False" | "Type" | "Kind" | "Sort")
+        || crate::builtins::Builtin::parse(name).is_some()
+}
 
 fn is_label_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
@@ -394,6 +412,21 @@ fn simple_label(input: &str) -> ParseResult<Label> {
     Ok((rest, Label::from(name)))
 }
 
+/// A nonreserved-label: rejects both keywords AND builtins (unless backtick-quoted).
+fn nonreserved_label(input: &str) -> ParseResult<Label> {
+    if let Ok(r) = backtick_label(input) {
+        return Ok(r);
+    }
+    let (rest, l) = simple_label(input)?;
+    if is_builtin_name(l.as_ref()) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    Ok((rest, l))
+}
+
 fn backtick_label(input: &str) -> ParseResult<Label> {
     delimited(
         char('`'),
@@ -406,8 +439,16 @@ fn label(input: &str) -> ParseResult<Label> {
     alt((backtick_label, simple_label))(input)
 }
 
+/// any-label-or-some: allows all labels plus the keyword `Some`.
+fn any_label_or_some(input: &str) -> ParseResult<Label> {
+    alt((
+        label,
+        map(keyword("Some"), |_| Label::from("Some")),
+    ))(input)
+}
+
 fn variable(input: &str) -> ParseResult<V> {
-    let (rest, l) = label(input)?;
+    let (rest, l) = nonreserved_label(input)?;
     let (rest, idx) = opt(preceded(
         delimited(ws, char('@'), ws),
         natural_literal,
@@ -545,12 +586,42 @@ fn http_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
 fn env_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     let (rest, _) = tag("env:")(input)?;
     let (rest, name) = alt((
-        // Quoted: env:"NAME"
-        delimited(char('"'), map(take_while1(|c: char| c != '"'), |s: &str| s.to_owned()), char('"')),
-        // Unquoted: env:NAME
+        // Quoted: env:"NAME" (POSIX env var with escapes)
+        delimited(char('"'), posix_env_var, char('"')),
+        // Unquoted: env:NAME (bash-style)
         map(take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_'), |s: &str| s.to_owned()),
     ))(rest)?;
     Ok((rest, ImportTarget::Env(name)))
+}
+
+/// Parse a POSIX-compliant quoted environment variable name.
+fn posix_env_var(input: &str) -> ParseResult<String> {
+    let (rest, chars) = many0(alt((
+        // Escape sequences
+        preceded(char('\\'), alt((
+            value('\x22', char('"')),
+            value('\x5C', char('\\')),
+            value('\x07', char('a')),
+            value('\x08', char('b')),
+            value('\x0C', char('f')),
+            value('\x0A', char('n')),
+            value('\x0D', char('r')),
+            value('\x09', char('t')),
+            value('\x0B', char('v')),
+        ))),
+        // Printable characters except double quote, backslash, and equals
+        nom::character::complete::satisfy(|c| {
+            let n = c as u32;
+            (0x20..=0x21).contains(&n)
+                || (0x23..=0x3C).contains(&n)
+                || (0x3E..=0x5B).contains(&n)
+                || (0x5D..=0x7E).contains(&n)
+        }),
+    )))(input)?;
+    if chars.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+    }
+    Ok((rest, chars.into_iter().collect()))
 }
 
 /// `missing` keyword — only needs to not be a prefix of an identifier
@@ -640,53 +711,48 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
     use std::collections::BTreeMap;
     delimited(
         terminated(char('{'), ws),
-        alt((
-            // Empty record literal: { = }, { =, }, { , = }, { , =, }
-            // ABNF: "{" whsp [ "," whsp ] record-type-or-literal whsp "}"
-            //        empty-record-literal = "=" [ whsp "," ]
-            map(
-                |input| {
-                    let (rest, _) = opt(terminated(char(','), ws))(input)?;
-                    let (rest, _) = char('=')(rest)?;
-                    let (rest, _) = opt(preceded(ws, char(',')))(rest)?;
-                    Ok((rest, ()))
-                },
-                |_| mkexpr(ExprKind::RecordLit(Default::default())),
-            ),
-            // Non-empty record (with optional leading/trailing commas)
-            map(
-                |input| {
-                    let (rest, _) = opt(terminated(char(','), ws))(input)?; // optional leading comma
-                    let (rest, entries) = separated_list0(delimited(ws, char(','), ws), record_entry)(rest)?;
-                    let (rest, _) = ws(rest)?;
-                    let (rest, _) = opt(terminated(char(','), ws))(rest)?; // optional trailing comma
-                    Ok((rest, entries))
-                },
-                |entries: Vec<(Label, char, Expr)>| {
-                    if entries.is_empty() {
-                        return mkexpr(ExprKind::RecordType(Default::default()));
+        |input| {
+            let (rest, has_leading_comma) = opt(terminated(char(','), ws))(input)?;
+            // Try empty record literal: = [,]
+            if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('=')(rest) {
+                let (rest2, _) = opt(preceded(ws, char(',')))(rest2)?;
+                return Ok((rest2, mkexpr(ExprKind::RecordLit(Default::default()))));
+            }
+            // Try non-empty record
+            if let Ok((rest2, first)) = record_entry(rest) {
+                let (rest2, _) = ws(rest2)?;
+                let (rest2, mut more) = many0(|input| {
+                    let (r, _) = char(',')(input)?;
+                    let (r, _) = ws(r)?;
+                    let (r, e) = record_entry(r)?;
+                    let (r, _) = ws(r)?;
+                    Ok((r, e))
+                })(rest2)?;
+                let (rest2, _) = opt(terminated(char(','), ws))(rest2)?;
+                let mut entries = vec![first];
+                entries.append(&mut more);
+                let is_type = entries.iter().all(|(_, sep, _)| *sep == ':');
+                if is_type {
+                    let map: BTreeMap<_, _> = entries.into_iter().map(|(l, _, e)| (l, e)).collect();
+                    return Ok((rest2, mkexpr(ExprKind::RecordType(map))));
+                } else {
+                    let mut map = BTreeMap::new();
+                    for (l, _, e) in entries {
+                        insert_recordlit_entry(&mut map, l, e);
                     }
-                    let is_type = entries.iter().all(|(_, sep, _)| *sep == ':');
-                    if is_type {
-                        let map: BTreeMap<_, _> = entries.into_iter().map(|(l, _, e)| (l, e)).collect();
-                        mkexpr(ExprKind::RecordType(map))
-                    } else {
-                        let mut map = BTreeMap::new();
-                        for (l, _, e) in entries {
-                            insert_recordlit_entry(&mut map, l, e);
-                        }
-                        mkexpr(ExprKind::RecordLit(map))
-                    }
-                },
-            ),
-        )),
+                    return Ok((rest2, mkexpr(ExprKind::RecordLit(map))));
+                }
+            }
+            // Empty record type {} or { , }
+            Ok((rest, mkexpr(ExprKind::RecordType(Default::default()))))
+        },
         preceded(ws, char('}')),
     )(input)
 }
 
 /// Record entry: `name = expr`, `name : type`, `name` (pun), or `name.a.b = expr` (dotted).
 fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
-    let (rest, first_label) = terminated(label, ws)(input)?;
+    let (rest, first_label) = terminated(any_label_or_some, ws)(input)?;
 
     // Try dotted field syntax: name.a.b = expr
     if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('.')(rest) {
@@ -694,7 +760,7 @@ fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
         // Collect remaining dot-separated labels
         let (rest2, more_labels) = separated_list0(
             delimited(ws, char('.'), ws),
-            label,
+            any_label_or_some,
         )(rest2)?;
         let (rest2, _) = ws(rest2)?;
         let (rest2, _) = char('=')(rest2)?;
@@ -733,9 +799,18 @@ fn list_literal(input: &str) -> ParseResult<Expr> {
         map(
             |input| {
                 let (rest, _) = opt(terminated(char(','), ws))(input)?;
-                let (rest, items) = separated_list0(delimited(ws, char(','), ws), expression)(rest)?;
+                let (rest, first) = expression(rest)?;
                 let (rest, _) = ws(rest)?;
+                let (rest, mut more) = many0(|input| {
+                    let (r, _) = char(',')(input)?;
+                    let (r, _) = ws(r)?;
+                    let (r, e) = expression(r)?;
+                    let (r, _) = ws(r)?;
+                    Ok((r, e))
+                })(rest)?;
                 let (rest, _) = opt(terminated(char(','), ws))(rest)?;
+                let mut items = vec![first];
+                items.append(&mut more);
                 Ok((rest, items))
             },
             |items| mkexpr(ExprKind::NEListLit(items)),
@@ -753,20 +828,38 @@ fn union_type(input: &str) -> ParseResult<Expr> {
         map(
             |input| {
                 let (rest, _) = opt(terminated(char('|'), ws))(input)?; // optional leading |
-                let (rest, entries) = separated_list0(
-                    delimited(ws, char('|'), ws),
-                    pair(
-                        terminated(label, ws),
-                        opt(|input| {
+                // Try to parse first entry
+                let (rest, entries) = if let Ok((r, first)) = (|input| -> ParseResult<(Label, Option<Expr>)> {
+                    let (r, l) = terminated(any_label_or_some, ws)(input)?;
+                    let (r, ty) = opt(|input| {
+                        let (r, _) = char(':')(input)?;
+                        let (r, _) = ws1(r)?;
+                        let (r, e) = expression(r)?;
+                        Ok((r, e))
+                    })(r)?;
+                    Ok((r, (l, ty)))
+                })(rest) {
+                    let (r, _) = ws(r)?;
+                    let (r, mut more) = many0(|input| {
+                        let (r, _) = char('|')(input)?;
+                        let (r, _) = ws(r)?;
+                        let (r, l) = terminated(any_label_or_some, ws)(r)?;
+                        let (r, ty) = opt(|input| {
                             let (r, _) = char(':')(input)?;
                             let (r, _) = ws1(r)?;
                             let (r, e) = expression(r)?;
                             Ok((r, e))
-                        }),
-                    ),
-                )(rest)?;
-                let (rest, _) = ws(rest)?;
-                let (rest, _) = opt(preceded(char('|'), ws))(rest)?; // optional trailing |
+                        })(r)?;
+                        let (r, _) = ws(r)?;
+                        Ok((r, (l, ty)))
+                    })(r)?;
+                    let (r, _) = opt(preceded(char('|'), ws))(r)?; // trailing | only after entries
+                    let mut entries = vec![first];
+                    entries.append(&mut more);
+                    (r, entries)
+                } else {
+                    (rest, vec![])
+                };
                 Ok((rest, entries))
             },
             |entries: Vec<(Label, Option<Expr>)>| {
@@ -807,14 +900,25 @@ fn selector_expression(input: &str) -> ParseResult<Expr> {
                     delimited(
                         terminated(char('{'), ws),
                         |input| {
-                            let (rest, _) = opt(terminated(char(','), ws))(input)?;
-                            let (rest, ls) = separated_list0(
-                                delimited(ws, char(','), ws),
-                                label,
-                            )(rest)?;
-                            let (rest, _) = ws(rest)?;
-                            let (rest, _) = opt(terminated(char(','), ws))(rest)?;
-                            Ok((rest, ls))
+                            let (rest, has_leading) = opt(terminated(char(','), ws))(input)?;
+                            if let Ok((r, first)) = any_label_or_some(rest) {
+                                let (r, _) = ws(r)?;
+                                let (r, mut more) = many0(|input| {
+                                    let (r, _) = char(',')(input)?;
+                                    let (r, _) = ws(r)?;
+                                    let (r, l) = any_label_or_some(r)?;
+                                    let (r, _) = ws(r)?;
+                                    Ok((r, l))
+                                })(r)?;
+                                let (r, _) = opt(terminated(char(','), ws))(r)?;
+                                let mut ls = vec![first];
+                                ls.append(&mut more);
+                                Ok((r, ls))
+                            } else if has_leading.is_some() {
+                                Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+                            } else {
+                                Ok((rest, vec![]))
+                            }
                         },
                         char('}'),
                     ),
@@ -1167,7 +1271,7 @@ fn let_expression(input: &str) -> ParseResult<Expr> {
     let (mut rest, _) = ws1(rest)?;
     let mut bindings = Vec::new();
     loop {
-        let (r, name) = terminated(label, ws)(rest)?;
+        let (r, name) = terminated(nonreserved_label, ws)(rest)?;
         let (r, annot) = opt(|input| {
             let (r, _) = char(':')(input)?;
             let (r, _) = ws1(r)?;
@@ -1202,7 +1306,7 @@ fn lambda_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = ws(rest)?;
     let (rest, _) = char('(')(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, name) = terminated(label, ws)(rest)?;
+    let (rest, name) = terminated(nonreserved_label, ws)(rest)?;
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = expression(rest)?;
@@ -1235,7 +1339,7 @@ fn forall_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = ws(rest)?;
     let (rest, _) = char('(')(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, name) = terminated(label, ws)(rest)?;
+    let (rest, name) = terminated(nonreserved_label, ws)(rest)?;
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = expression(rest)?;
@@ -1294,7 +1398,7 @@ fn with_expression(input: &str) -> ParseResult<Expr> {
     let (rest, _) = ws1(rest)?;
     let (rest, labels) = separated_list0(
         delimited(ws, char('.'), ws),
-        label,
+        any_label_or_some,
     )(rest)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char('=')(rest)?;
@@ -1310,7 +1414,7 @@ fn with_expression(input: &str) -> ParseResult<Expr> {
             let (r, _) = ws1(r)?;
             let (r, labels) = separated_list0(
                 delimited(ws, char('.'), ws),
-                label,
+                any_label_or_some,
             )(r)?;
             let (r, _) = ws(r)?;
             let (r, _) = char('=')(r)?;
