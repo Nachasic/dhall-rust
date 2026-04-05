@@ -641,10 +641,16 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
     delimited(
         terminated(char('{'), ws),
         alt((
-            // { = } or { =, } — empty record literal
-            // ABNF: empty-record-literal = "=" [ whsp "," ]
+            // Empty record literal: { = }, { =, }, { , = }, { , =, }
+            // ABNF: "{" whsp [ "," whsp ] record-type-or-literal whsp "}"
+            //        empty-record-literal = "=" [ whsp "," ]
             map(
-                preceded(char('='), opt(preceded(ws, char(',')))),
+                |input| {
+                    let (rest, _) = opt(terminated(char(','), ws))(input)?;
+                    let (rest, _) = char('=')(rest)?;
+                    let (rest, _) = opt(preceded(ws, char(',')))(rest)?;
+                    Ok((rest, ()))
+                },
                 |_| mkexpr(ExprKind::RecordLit(Default::default())),
             ),
             // Non-empty record (with optional leading/trailing commas)
@@ -1928,10 +1934,19 @@ mod tests {
 
     #[test]
     fn test_union_type_no_space_colon() {
-        // Test just the union type parser directly
-        let r = super::union_type("< x: T | y: U >");
-        eprintln!("union_type result: {:?}", r);
         let e = parse_expr("< x: T | y: U >");
         assert!(e.is_ok(), "union type with no space before colon: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_empty_record_leading_comma() {
+        let e = parse_expr("{ , = }");
+        assert!(e.is_ok(), "empty record with leading comma: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_empty_record_trailing_comma() {
+        let e = parse_expr("{ =, }");
+        assert!(e.is_ok(), "empty record with trailing comma: {:?}", e.err());
     }
 }
