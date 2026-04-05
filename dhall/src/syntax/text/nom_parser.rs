@@ -483,27 +483,114 @@ fn application(input: &str) -> ParseResult<Expr> {
     ))
 }
 
-// ── 9. Operators (simplified precedence) ─────────────────────────────
+// ── 9. Operators (full precedence tower) ─────────────────────────────
 //
-// Full implementation needs a precedence climber for all 13 Dhall operators.
-// For now, only + and ++ are handled as a proof of concept.
+// Lowest precedence at the top, highest at the bottom.
+// All operators are left-associative.
+// Each level parses its operator and delegates to the next level for operands.
+
+/// Helper: build a left-associative binary operator parser for one precedence level.
+macro_rules! binop_level {
+    // Single operator — no alt() needed
+    ($name:ident, $next:ident, $op_tag:expr => $op_variant:expr) => {
+        fn $name(input: &str) -> ParseResult<Expr> {
+            let (mut rest, mut lhs) = $next(input)?;
+            loop {
+                let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
+                    let (r, _) = ws(rest)?;
+                    let (r, _) = tag($op_tag)(r)?;
+                    let (r, _) = ws(r)?;
+                    let (r, rhs) = $next(r)?;
+                    Ok((r, ($op_variant, rhs)))
+                })();
+                match tried {
+                    Ok((r, (op, rhs))) => {
+                        lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                        rest = r;
+                    }
+                    Err(_) => break,
+                }
+            }
+            Ok((rest, lhs))
+        }
+    };
+    // Multiple operators — use alt()
+    ($name:ident, $next:ident, $( $op_tag:expr => $op_variant:expr ),+ $(,)?) => {
+        fn $name(input: &str) -> ParseResult<Expr> {
+            let (mut rest, mut lhs) = $next(input)?;
+            loop {
+                let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
+                    let (r, _) = ws(rest)?;
+                    let (r, op) = alt((
+                        $( value($op_variant, tag($op_tag)) ),+
+                    ))(r)?;
+                    let (r, _) = ws(r)?;
+                    let (r, rhs) = $next(r)?;
+                    Ok((r, (op, rhs)))
+                })();
+                match tried {
+                    Ok((r, (op, rhs))) => {
+                        lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                        rest = r;
+                    }
+                    Err(_) => break,
+                }
+            }
+            Ok((rest, lhs))
+        }
+    };
+}
+
+use crate::operations::BinOp::*;
+
+/// Match `==` but not `===`
+fn op_bool_eq(input: &str) -> ParseResult<crate::operations::BinOp> {
+    let (rest, _) = tag("==")(input)?;
+    if rest.starts_with('=') {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    } else {
+        Ok((rest, BoolEQ))
+    }
+}
+
+// Ordering matters: longer tokens must come first to avoid prefix matches.
+binop_level!(equiv_expr,                   import_alt_expr,    "===" => Equivalence);
+binop_level!(import_alt_expr,              or_expr,            "?" => ImportAlt);
+binop_level!(or_expr,                      text_append_expr,   "||" => BoolOr);
+binop_level!(text_append_expr,             plus_expr,          "++" => TextAppend);
+binop_level!(plus_expr,                    list_append_expr,   "+" => NaturalPlus);
+binop_level!(list_append_expr,             and_expr,           "#" => ListAppend);
+binop_level!(and_expr,                     combine_expr,       "&&" => BoolAnd);
+binop_level!(combine_expr,                 prefer_expr,        "∧" => RecursiveRecordMerge, "/\\" => RecursiveRecordMerge);
+binop_level!(prefer_expr,                  combine_types_expr, "⫽" => RightBiasedRecordMerge);
+binop_level!(combine_types_expr,           times_expr,         "⩓" => RecursiveRecordTypeMerge);
+binop_level!(times_expr,                   bool_eq_expr,       "*" => NaturalTimes);
+binop_level!(ne_expr,                      application,        "!=" => BoolNE);
+
+/// `==` level needs special handling to not consume `===`.
+fn bool_eq_expr(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut lhs) = ne_expr(input)?;
+    loop {
+        let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
+            let (r, _) = ws(rest)?;
+            let (r, op) = op_bool_eq(r)?;
+            let (r, _) = ws(r)?;
+            let (r, rhs) = ne_expr(r)?;
+            Ok((r, (op, rhs)))
+        })();
+        match tried {
+            Ok((r, (op, rhs))) => {
+                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, lhs, rhs)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, lhs))
+}
 
 fn operator_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, first) = application(input)?;
-    let (rest, pairs) = many0(pair(
-        lexeme(alt((
-            value(crate::operations::BinOp::NaturalPlus, tag("+")),
-            value(crate::operations::BinOp::TextAppend, tag("++")),
-            value(crate::operations::BinOp::ListAppend, tag("#")),
-        ))),
-        application,
-    ))(rest)?;
-    Ok((
-        rest,
-        pairs.into_iter().fold(first, |acc, (op, rhs)| {
-            mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(op, acc, rhs)))
-        }),
-    ))
+    equiv_expr(input)
 }
 
 // ── 10. Top-level expressions ────────────────────────────────────────
@@ -676,6 +763,69 @@ mod tests {
         let e = parse_expr("let x = 1 in let y = 2 in x + y").unwrap();
         let s = e.to_string();
         assert!(s.contains("let") && s.contains("x") && s.contains("y"), "got: {}", s);
+    }
+
+    // ── Operator tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_bool_and() {
+        let e = parse_expr("True && False").unwrap();
+        assert_eq!(e.to_string(), "True && False");
+    }
+
+    #[test]
+    fn test_bool_or() {
+        let e = parse_expr("True || False").unwrap();
+        assert_eq!(e.to_string(), "True || False");
+    }
+
+    #[test]
+    fn test_bool_eq() {
+        let e = parse_expr("True == False").unwrap();
+        assert_eq!(e.to_string(), "True == False");
+    }
+
+    #[test]
+    fn test_bool_ne() {
+        let e = parse_expr("True != False").unwrap();
+        assert_eq!(e.to_string(), "True != False");
+    }
+
+    #[test]
+    fn test_natural_times() {
+        let e = parse_expr("3 * 4").unwrap();
+        assert_eq!(e.to_string(), "3 * 4");
+    }
+
+    #[test]
+    fn test_text_append() {
+        let e = parse_expr(r#""a" ++ "b""#).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("++"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_list_append() {
+        let e = parse_expr("[1] # [2]").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("#"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_precedence_plus_times() {
+        // * binds tighter than +
+        let e = parse_expr("1 + 2 * 3").unwrap();
+        let s = e.to_string();
+        // Should be 1 + (2 * 3), printed as "1 + 2 * 3"
+        assert_eq!(s, "1 + 2 * 3");
+    }
+
+    #[test]
+    fn test_precedence_and_or() {
+        // && binds tighter than ||
+        let e = parse_expr("True || False && True").unwrap();
+        let s = e.to_string();
+        assert_eq!(s, "True || False && True");
     }
 
     #[test]
