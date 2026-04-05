@@ -8,7 +8,7 @@ pub mod conv;
 use std::sync::Arc;
 
 use dhall::ctxt::{CustomBuiltinEntry, CustomBuiltinHandler};
-use dhall::semantics::{ImportFetcher, Nir, NirKind};
+use dhall::semantics::{ImportFetcher, Nir, NirKind, TyEnv, type_with};
 use dhall::syntax::Label;
 use dhall::{Ctxt, Parsed};
 
@@ -43,13 +43,21 @@ impl Engine {
         self
     }
 
+    /// Register a custom builtin with a Dhall type signature.
+    ///
+    /// The `type_sig` must be a valid Dhall type expression, e.g.:
+    /// - `"Natural -> Natural"`
+    /// - `"{ name : Text, src : Text } -> { hash : Text, name : Text }"`
+    /// - `"forall (a : Type) -> List a -> Natural"`
     pub fn with_builtin(
         mut self,
         name: &str,
+        type_sig: &str,
         handler: impl for<'cx> CustomBuiltinHandler<'cx> + 'static,
     ) -> Self {
         self.builtins.push(CustomBuiltinEntry {
             name: name.to_owned(),
+            type_sig: type_sig.to_owned(),
             handler: Arc::new(handler),
         });
         self
@@ -77,16 +85,22 @@ impl Engine {
             }
             let hir = dhall::expr_to_hir(&expr, &mut name_env);
 
-            // Build NzEnv with CustomBuiltin values at matching indices.
-            let mut nz_env = dhall::semantics::NzEnv::new(cx);
-            for (i, _) in self.builtins.iter().enumerate() {
-                nz_env = nz_env.insert_value(
-                    Nir::from_kind(NirKind::CustomBuiltin(cx, i, Vec::new())),
-                    (),
-                );
+            // Build TyEnv with custom builtins and their types.
+            let mut ty_env = TyEnv::new(cx);
+            for (i, b) in self.builtins.iter().enumerate() {
+                let type_hir = Parsed::parse_str(&b.type_sig)?
+                    .skip_resolve(cx)?
+                    .typecheck(cx)?
+                    .as_hir()
+                    .clone();
+                let ty = type_with(&ty_env, &type_hir, None)?.eval_to_type(&ty_env)?;
+                let nir = Nir::from_kind(NirKind::CustomBuiltin(cx, i, Vec::new()));
+                ty_env = ty_env.insert_value(&Label::from(b.name.as_str()), nir, ty);
             }
 
-            let nir = hir.eval(nz_env);
+            // Typecheck the user expression in the enriched environment.
+            let typed = type_with(&ty_env, &hir, None)?;
+            let nir = typed.eval(ty_env.to_nzenv());
             Ok(nir.to_expr(cx, Default::default()))
         })
     }

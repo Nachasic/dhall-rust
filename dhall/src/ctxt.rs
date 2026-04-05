@@ -45,10 +45,11 @@ use crate::Typed;
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 // Ctxt
 
-/// A registered custom builtin: name + handler.
+/// A registered custom builtin: name + type signature + handler.
 #[derive(Clone)]
 pub struct CustomBuiltinEntry {
     pub name: String,
+    pub type_sig: String,
     pub handler: Arc<dyn for<'cx> CustomBuiltinHandler<'cx>>,
 }
 
