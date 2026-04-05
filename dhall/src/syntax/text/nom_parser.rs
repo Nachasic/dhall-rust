@@ -45,6 +45,18 @@ fn mkexpr(kind: UnspannedExpr) -> Expr {
     Expr::new(kind, Span::Artificial)
 }
 
+/// Parse a keyword, ensuring it's not a prefix of a longer identifier.
+fn keyword<'a>(kw: &'static str) -> impl FnMut(&'a str) -> ParseResult<'a, &'a str> {
+    move |input: &'a str| {
+        let (rest, matched) = tag(kw)(input)?;
+        if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
+            Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        } else {
+            Ok((rest, matched))
+        }
+    }
+}
+
 /// Insert a record literal entry, merging duplicates with `∧`.
 fn insert_recordlit_entry(map: &mut std::collections::BTreeMap<Label, Expr>, l: Label, e: Expr) {
     use std::collections::btree_map::Entry;
@@ -111,6 +123,25 @@ fn block_comment(input: &str) -> Result<&str, nom::Err<nom::error::Error<&str>>>
     }
 }
 
+/// Mandatory whitespace (at least one space/tab/newline/comment).
+fn ws1(input: &str) -> ParseResult<()> {
+    let start = input;
+    let (rest, _) = ws(input)?;
+    if rest.len() == start.len() {
+        // No whitespace consumed
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Space)))
+    } else {
+        Ok((rest, ()))
+    }
+}
+
+/// Wrap a parser to consume mandatory leading whitespace.
+fn after_ws1<'a, O>(
+    inner: impl FnMut(&'a str) -> ParseResult<'a, O>,
+) -> impl FnMut(&'a str) -> ParseResult<'a, O> {
+    preceded(ws1, inner)
+}
+
 /// Wrap a parser to consume trailing whitespace.
 fn lexeme<'a, O>(
     inner: impl FnMut(&'a str) -> ParseResult<'a, O>,
@@ -127,9 +158,20 @@ fn natural_literal(input: &str) -> ParseResult<u64> {
             preceded(tag("0x"), take_while1(|c: char| c.is_ascii_hexdigit())),
             |s: &str| u64::from_str_radix(s, 16),
         ),
-        // Decimal
-        map_res(digit1, |s: &str| s.parse::<u64>()),
+        // Decimal (reject leading zeros like 042)
+        decimal_natural,
     ))(input)
+}
+
+fn decimal_natural(input: &str) -> ParseResult<u64> {
+    let (rest, s) = digit1(input)?;
+    if s.len() > 1 && s.starts_with('0') {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    } else {
+        s.parse::<u64>()
+            .map(|n| (rest, n))
+            .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    }
 }
 
 fn integer_literal(input: &str) -> ParseResult<i64> {
@@ -412,6 +454,15 @@ fn builtin(input: &str) -> ParseResult<UnspannedExpr> {
     Ok((rest, expr))
 }
 
+fn builtin_no_index(input: &str) -> ParseResult<Expr> {
+    let (rest, b) = builtin(input)?;
+    if rest.starts_with('@') {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+    } else {
+        Ok((rest, mkexpr(b)))
+    }
+}
+
 // ── 4b. Imports ──────────────────────────────────────────────────────
 
 use crate::syntax::{FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
@@ -516,11 +567,10 @@ fn env_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     Ok((rest, ImportTarget::Env(name)))
 }
 
-/// `missing` keyword
+/// `missing` keyword — only needs to not be a prefix of an identifier
 fn missing_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
     let (rest, _) = tag("missing")(input)?;
-    // Make sure it's not a prefix of a longer identifier
-    if rest.starts_with(|c: char| is_label_char(c)) {
+    if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
         return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
     }
     Ok((rest, ImportTarget::Missing))
@@ -548,7 +598,7 @@ fn import_expr(input: &str) -> ParseResult<Expr> {
     let (rest, hash) = opt(lexeme(import_hash))(rest)?;
 
     let (rest, mode) = opt(preceded(
-        lexeme(tag("as")),
+        lexeme(keyword("as")),
         lexeme(alt((
             value(ImportMode::RawText, tag("Text")),
             value(ImportMode::Location, tag("Location")),
@@ -590,8 +640,8 @@ fn atom(input: &str) -> ParseResult<Expr> {
         list_literal,
         // Imports (before builtins/variables — `missing`, `env:` look like identifiers)
         import_expr,
-        // Builtins and constants (must come before variable)
-        map(builtin, mkexpr),
+        // Builtins and constants (reject if followed by @ — that's invalid)
+        builtin_no_index,
         // Variable
         map(variable, |v| mkexpr(ExprKind::Var(v))),
     )))(input)
@@ -614,6 +664,8 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
                 |input| {
                     let (rest, _) = opt(lexeme(char(',')))(input)?; // optional leading comma
                     let (rest, entries) = separated_list0(lexeme(char(',')), record_entry)(rest)?;
+                    // Reject double commas: if entries is empty but we consumed a comma, that's `{,}`
+                    // which is only valid as `{,=}`. Otherwise trailing comma is fine.
                     let (rest, _) = opt(lexeme(char(',')))(rest)?; // optional trailing comma
                     Ok((rest, entries))
                 },
@@ -658,9 +710,15 @@ fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
     }
 
     // Try `name = expr` or `name : type`
-    if let Ok((rest2, sep)) = lexeme(alt((char('='), char(':'))))(rest) {
+    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('=')(rest) {
+        let (rest2, _) = ws(rest2)?;
         let (rest2, val) = expression(rest2)?;
-        return Ok((rest2, (first_label, sep, val)));
+        return Ok((rest2, (first_label, '=', val)));
+    }
+    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>(':')(rest) {
+        let (rest2, _) = ws(rest2)?;
+        let (rest2, val) = expression(rest2)?;
+        return Ok((rest2, (first_label, ':', val)));
     }
 
     // Pun: `{ name }` desugars to `{ name = name }`
@@ -794,26 +852,33 @@ fn completion_expression(input: &str) -> ParseResult<Expr> {
 /// Keyword-prefixed application: `Some e`, `merge x y`, `toMap x`
 fn first_application(input: &str) -> ParseResult<Expr> {
     alt((
-        // Some e
-        map(
-            preceded(pair(lexeme(tag("Some")), ws), completion_expression),
-            |e| mkexpr(ExprKind::SomeLit(e)),
-        ),
-        // merge x y (without type annotation — that's at expression level)
-        |input| {
-            let (rest, _) = lexeme(tag("merge"))(input)?;
-            let (rest, x) = completion_expression(rest)?;
-            let (rest, y) = completion_expression(rest)?;
-            Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, None)))))
-        },
+        // Some e (mandatory whitespace after Some)
+        some_application,
+        // merge x y (without type annotation)
+        merge_application,
         // toMap x (without type annotation)
-        |input| {
-            let (rest, _) = lexeme(tag("toMap"))(input)?;
-            let (rest, x) = completion_expression(rest)?;
-            Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, None)))))
-        },
+        tomap_application,
         completion_expression,
     ))(input)
+}
+
+fn some_application(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(keyword("Some"))(input)?;
+    let (rest, e) = completion_expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::SomeLit(e))))
+}
+
+fn merge_application(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(keyword("merge"))(input)?;
+    let (rest, x) = completion_expression(rest)?;
+    let (rest, y) = completion_expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, None)))))
+}
+
+fn tomap_application(input: &str) -> ParseResult<Expr> {
+    let (rest, _) = lexeme(keyword("toMap"))(input)?;
+    let (rest, x) = completion_expression(rest)?;
+    Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::ToMap(x, None)))))
 }
 
 /// Function application: `f a b` = `App(App(f, a), b)`
@@ -826,6 +891,82 @@ fn application(input: &str) -> ParseResult<Expr> {
             mkexpr(ExprKind::Op(crate::operations::OpKind::App(acc, arg)))
         }),
     ))
+}
+
+/// Like completion_expression but the inner atom doesn't allow integer literals.
+fn completion_expression_no_int(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut expr) = selector_expression_no_int(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = lexeme(tag("::"))(rest)?;
+            let (r, rhs) = selector_expression(r)?;
+            Ok((r, mkexpr(ExprKind::Op(crate::operations::OpKind::Completion(expr.clone(), rhs)))))
+        })();
+        match tried {
+            Ok((r, e)) => { expr = e; rest = r; }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, expr))
+}
+
+fn selector_expression_no_int(input: &str) -> ParseResult<Expr> {
+    use std::collections::BTreeSet;
+    let (mut rest, mut expr) = atom_no_int(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = lexeme(char('.'))(rest)?;
+            let (r, sel) = alt((
+                map(
+                    delimited(
+                        lexeme(char('{')),
+                        |input| {
+                            let (rest, _) = opt(lexeme(char(',')))(input)?;
+                            let (rest, ls) = separated_list0(lexeme(char(',')), label)(rest)?;
+                            let (rest, _) = opt(lexeme(char(',')))(rest)?;
+                            Ok((rest, ls))
+                        },
+                        lexeme(char('}')),
+                    ),
+                    |ls| {
+                        let set: BTreeSet<_> = ls.into_iter().collect();
+                        mkexpr(ExprKind::Op(crate::operations::OpKind::Projection(expr.clone(), set)))
+                    },
+                ),
+                map(
+                    delimited(lexeme(char('(')), expression, lexeme(char(')'))),
+                    |e| mkexpr(ExprKind::Op(crate::operations::OpKind::ProjectionByExpr(expr.clone(), e))),
+                ),
+                map(label, |l| {
+                    mkexpr(ExprKind::Op(crate::operations::OpKind::Field(expr.clone(), l)))
+                }),
+            ))(r)?;
+            Ok((r, sel))
+        })();
+        match tried {
+            Ok((r, e)) => { expr = e; rest = r; }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, expr))
+}
+
+/// Atom without integer literal — used in application arguments.
+fn atom_no_int(input: &str) -> ParseResult<Expr> {
+    lexeme(alt((
+        delimited(lexeme(char('(')), expression, lexeme(char(')'))),
+        map(double_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Double(n)))),
+        map(natural_literal, |n| mkexpr(ExprKind::Num(crate::syntax::NumKind::Natural(n)))),
+        map(double_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
+        map(single_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
+        record_literal_or_type,
+        union_type,
+        empty_list_literal,
+        list_literal,
+        import_expr,
+        builtin_no_index,
+        map(variable, |v| mkexpr(ExprKind::Var(v))),
+    )))(input)
 }
 
 // ── 9. Operators (full precedence tower) ─────────────────────────────
@@ -903,8 +1044,33 @@ binop_level!(equiv_expr,                   import_alt_expr,    "===" => Equivale
 binop_level!(import_alt_expr,              or_expr,            "?" => ImportAlt);
 binop_level!(or_expr,                      text_append_expr,   "||" => BoolOr);
 binop_level!(text_append_expr,             plus_expr,          "++" => TextAppend);
-binop_level!(plus_expr,                    list_append_expr,   "+" => NaturalPlus);
 binop_level!(list_append_expr,             and_expr,           "#" => ListAppend);
+
+/// `+` requires the operands to not be immediately adjacent (to distinguish from `+2` integer)
+fn plus_expr(input: &str) -> ParseResult<Expr> {
+    let (mut rest, mut lhs) = list_append_expr(input)?;
+    loop {
+        let tried = (|| -> ParseResult<Expr> {
+            let (r, _) = ws(rest)?;
+            let (r, _) = char('+')(r)?;
+            // Reject ++ (that's text append)
+            if r.starts_with('+') {
+                return Err(nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Tag)));
+            }
+            let (r, _) = ws(r)?;
+            let (r, rhs) = list_append_expr(r)?;
+            Ok((r, rhs))
+        })();
+        match tried {
+            Ok((r, rhs)) => {
+                lhs = mkexpr(ExprKind::Op(crate::operations::OpKind::BinOp(NaturalPlus, lhs, rhs)));
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((rest, lhs))
+}
 binop_level!(and_expr,                     combine_expr,       "&&" => BoolAnd);
 binop_level!(times_expr,                   bool_eq_expr,       "*" => NaturalTimes);
 binop_level!(ne_expr,                      application,        "!=" => BoolNE);
@@ -1014,9 +1180,7 @@ fn operator_expression(input: &str) -> ParseResult<Expr> {
 // ── 10. Top-level expressions ────────────────────────────────────────
 
 fn let_expression(input: &str) -> ParseResult<Expr> {
-    // Parse one or more let bindings followed by `in` and a body.
-    // `let x = 1 let y = 2 in x + y` is valid.
-    let (mut rest, _) = lexeme(tag("let"))(input)?;
+    let (mut rest, _) = lexeme(keyword("let"))(input)?;
     let mut bindings = Vec::new();
     loop {
         let (r, name) = label(rest)?;
@@ -1025,15 +1189,14 @@ fn let_expression(input: &str) -> ParseResult<Expr> {
         let (r, val) = expression(r)?;
         bindings.push((name, annot, val));
         rest = r;
-        // Check for another `let` or `in`
-        if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("let")(rest) {
+        if let Ok((r, _)) = keyword::<'_>("let")(rest) {
             let (r, _) = ws(r)?;
             rest = r;
         } else {
             break;
         }
     }
-    let (rest, _) = lexeme(tag("in"))(rest)?;
+    let (rest, _) = lexeme(keyword("in"))(rest)?;
     let (rest, body) = expression(rest)?;
     let expr = bindings.into_iter().rev().fold(body, |acc, (name, annot, val)| {
         mkexpr(ExprKind::Let(name, annot, val, acc))
@@ -1054,11 +1217,11 @@ fn lambda_expression(input: &str) -> ParseResult<Expr> {
 }
 
 fn if_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, _) = lexeme(tag("if"))(input)?;
+    let (rest, _) = lexeme(keyword("if"))(input)?;
     let (rest, cond) = expression(rest)?;
-    let (rest, _) = lexeme(tag("then"))(rest)?;
+    let (rest, _) = lexeme(keyword("then"))(rest)?;
     let (rest, t) = expression(rest)?;
-    let (rest, _) = lexeme(tag("else"))(rest)?;
+    let (rest, _) = lexeme(keyword("else"))(rest)?;
     let (rest, f) = expression(rest)?;
     Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::BoolIf(cond, t, f)))))
 }
@@ -1076,15 +1239,15 @@ fn forall_expression(input: &str) -> ParseResult<Expr> {
 }
 
 fn assert_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, _) = lexeme(tag("assert"))(input)?;
+    let (rest, _) = lexeme(keyword("assert"))(input)?;
     let (rest, _) = lexeme(char(':'))(rest)?;
     let (rest, e) = expression(rest)?;
     Ok((rest, mkexpr(ExprKind::Assert(e))))
 }
 
-/// `merge x y : T` (with type annotation — without is in first_application)
+/// `merge x y : T` (with type annotation)
 fn merge_annot_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, _) = lexeme(tag("merge"))(input)?;
+    let (rest, _) = lexeme(keyword("merge"))(input)?;
     let (rest, x) = completion_expression(rest)?;
     let (rest, y) = completion_expression(rest)?;
     let (rest, _) = lexeme(char(':'))(rest)?;
@@ -1092,9 +1255,9 @@ fn merge_annot_expression(input: &str) -> ParseResult<Expr> {
     Ok((rest, mkexpr(ExprKind::Op(crate::operations::OpKind::Merge(x, y, Some(ty))))))
 }
 
-/// `toMap x : T` (with type annotation — without is in first_application)
+/// `toMap x : T` (with type annotation)
 fn tomap_annot_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, _) = lexeme(tag("toMap"))(input)?;
+    let (rest, _) = lexeme(keyword("toMap"))(input)?;
     let (rest, x) = completion_expression(rest)?;
     let (rest, _) = lexeme(char(':'))(rest)?;
     let (rest, ty) = expression(rest)?;
@@ -1106,8 +1269,9 @@ fn with_expression(input: &str) -> ParseResult<Expr> {
     let (mut rest, mut expr) = operator_expression(input)?;
     loop {
         let tried = (|| -> ParseResult<(Vec<Label>, Expr)> {
-            let (r, _) = lexeme(tag("with"))(rest)?;
+            let (r, _) = lexeme(keyword("with"))(rest)?;
             let (r, labels) = separated_list0(lexeme(char('.')), label)(r)?;
+            let (r, _) = ws(r)?;
             let (r, _) = lexeme(char('='))(r)?;
             let (r, val) = operator_expression(r)?;
             Ok((r, (labels, val)))
