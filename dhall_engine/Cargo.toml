@@ -1,0 +1,10 @@
+[package]
+name = "dhall_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Extensible evaluation engine for the Dhall configuration language"
+license = "BSD-2-Clause"
+repository = "https://github.com/Nadrieril/dhall-rust"
+
+[dependencies]
+dhall = { path = "../dhall", default-features = false }
