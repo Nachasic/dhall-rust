@@ -559,21 +559,24 @@ fn atom(input: &str) -> ParseResult<Expr> {
 // ── 6. Records ───────────────────────────────────────────────────────
 
 fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
+    use std::collections::BTreeMap;
     delimited(
         lexeme(char('{')),
         alt((
             // { = } — empty record literal
             map(lexeme(char('=')), |_| mkexpr(ExprKind::RecordLit(Default::default()))),
-            // { field = expr, ... } or { field : type, ... }
+            // Non-empty record
             map(
                 separated_list0(lexeme(char(',')), record_entry),
                 |entries| {
                     if entries.is_empty() {
                         return mkexpr(ExprKind::RecordType(Default::default()));
                     }
-                    // Determine if this is a literal or type by the separator used
                     let is_type = entries.iter().all(|(_, sep, _)| *sep == ':');
-                    let map = entries.into_iter().map(|(l, _, e)| (l, e)).collect();
+                    let mut map = BTreeMap::new();
+                    for (l, _, e) in entries {
+                        map.insert(l, e);
+                    }
                     if is_type {
                         mkexpr(ExprKind::RecordType(map))
                     } else {
@@ -586,12 +589,33 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
     )(input)
 }
 
+/// Record entry: `name = expr`, `name : type`, `name` (pun), or `name.a.b = expr` (dotted).
 fn record_entry(input: &str) -> ParseResult<(Label, char, Expr)> {
-    tuple((
-        label,
-        lexeme(alt((char('='), char(':')))),
-        expression,
-    ))(input)
+    let (rest, first_label) = label(input)?;
+
+    // Try dotted field syntax: name.a.b = expr
+    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('.')(rest) {
+        // Collect remaining dot-separated labels
+        let (rest2, more_labels) = separated_list0(lexeme(char('.')), label)(rest2)?;
+        let (rest2, _) = lexeme(char('='))(rest2)?;
+        let (rest2, val) = expression(rest2)?;
+        // Desugar: { a.b.c = v } → { a = { b = { c = v } } }
+        let nested = more_labels.into_iter().rev().fold(val, |inner, l| {
+            let map = std::iter::once((l, inner)).collect();
+            Expr::new(ExprKind::RecordLit(map), Span::Artificial)
+        });
+        return Ok((rest2, (first_label, '=', nested)));
+    }
+
+    // Try `name = expr` or `name : type`
+    if let Ok((rest2, sep)) = lexeme(alt((char('='), char(':'))))(rest) {
+        let (rest2, val) = expression(rest2)?;
+        return Ok((rest2, (first_label, sep, val)));
+    }
+
+    // Pun: `{ name }` desugars to `{ name = name }`
+    let pun_expr = Expr::new(ExprKind::Var(V(first_label.clone(), 0)), Span::Artificial);
+    Ok((rest, (first_label, '=', pun_expr)))
 }
 
 // ── 7. Lists ─────────────────────────────────────────────────────────
@@ -1312,6 +1336,38 @@ mod tests {
         let e = parse_expr("Natural -> Text").unwrap();
         let s = e.to_string();
         assert!(s.contains("Natural") && s.contains("Text"), "got: {}", s);
+    }
+
+    // ── Record sugar tests ───────────────────────────────────────
+
+    #[test]
+    fn test_record_pun() {
+        // { x } desugars to { x = x }
+        let e = parse_expr("let x = 1 in { x }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("x"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_record_pun_multiple() {
+        let e = parse_expr("let x = 1 in let y = 2 in { x, y }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("x") && s.contains("y"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_record_dotted_field() {
+        // { a.b = 1 } desugars to { a = { b = 1 } }
+        let e = parse_expr("{ a.b = 1 }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("a") && s.contains("b") && s.contains("1"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_record_dotted_field_deep() {
+        let e = parse_expr("{ a.b.c = True }").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("a") && s.contains("b") && s.contains("c"), "got: {}", s);
     }
 
     #[test]
