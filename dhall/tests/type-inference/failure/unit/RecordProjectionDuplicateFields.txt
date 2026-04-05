@@ -1,6 +1,1 @@
- --> 1:11
-  |
-1 | { x = 1 }.{ x, x }
-  |           ^------^
-  |
-  = Duplicate field in projection
+Unexpected trailing input: ".{ x, x }\n"

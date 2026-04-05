@@ -749,7 +749,13 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
                 entries.append(&mut more);
                 let is_type = entries.iter().all(|(_, sep, _)| *sep == ':');
                 if is_type {
-                    let map: BTreeMap<_, _> = entries.into_iter().map(|(l, _, e)| (l, e)).collect();
+                    let mut map = BTreeMap::new();
+                    for (l, _, e) in entries {
+                        if map.contains_key(&l) {
+                            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+                        }
+                        map.insert(l, e);
+                    }
                     return Ok((rest2, mkexpr(ExprKind::RecordType(map))));
                 } else {
                     let mut map = BTreeMap::new();
@@ -839,52 +845,48 @@ fn list_literal(input: &str) -> ParseResult<Expr> {
 
 fn union_type(input: &str) -> ParseResult<Expr> {
     use std::collections::BTreeMap;
-    delimited(
-        terminated(char('<'), ws),
-        map(
-            |input| {
-                let (rest, _) = opt(terminated(char('|'), ws))(input)?; // optional leading |
-                // Try to parse first entry
-                let (rest, entries) = if let Ok((r, first)) = (|input| -> ParseResult<(Label, Option<Expr>)> {
-                    let (r, l) = terminated(any_label_or_some, ws)(input)?;
-                    let (r, ty) = opt(|input| {
-                        let (r, _) = char(':')(input)?;
-                        let (r, _) = ws1(r)?;
-                        let (r, e) = expression(r)?;
-                        Ok((r, e))
-                    })(r)?;
-                    Ok((r, (l, ty)))
-                })(rest) {
-                    let (r, _) = ws(r)?;
-                    let (r, mut more) = many0(|input| {
-                        let (r, _) = char('|')(input)?;
-                        let (r, _) = ws(r)?;
-                        let (r, l) = terminated(any_label_or_some, ws)(r)?;
-                        let (r, ty) = opt(|input| {
-                            let (r, _) = char(':')(input)?;
-                            let (r, _) = ws1(r)?;
-                            let (r, e) = expression(r)?;
-                            Ok((r, e))
-                        })(r)?;
-                        let (r, _) = ws(r)?;
-                        Ok((r, (l, ty)))
-                    })(r)?;
-                    let (r, _) = opt(preceded(char('|'), ws))(r)?; // trailing | only after entries
-                    let mut entries = vec![first];
-                    entries.append(&mut more);
-                    (r, entries)
-                } else {
-                    (rest, vec![])
-                };
-                Ok((rest, entries))
-            },
-            |entries: Vec<(Label, Option<Expr>)>| {
-                let map: BTreeMap<_, _> = entries.into_iter().collect();
-                mkexpr(ExprKind::UnionType(map))
-            },
-        ),
-        preceded(ws, char('>')),
-    )(input)
+    let (rest, _) = terminated(char('<'), ws)(input)?;
+    let (rest, _) = opt(terminated(char('|'), ws))(rest)?;
+    let (rest, entries) = if let Ok((r, first)) = (|input| -> ParseResult<(Label, Option<Expr>)> {
+        let (r, l) = terminated(any_label_or_some, ws)(input)?;
+        let (r, ty) = opt(|input| {
+            let (r, _) = char(':')(input)?;
+            let (r, _) = ws1(r)?;
+            let (r, e) = expression(r)?;
+            Ok((r, e))
+        })(r)?;
+        Ok((r, (l, ty)))
+    })(rest) {
+        let (r, _) = ws(r)?;
+        let (r, mut more) = many0(|input| {
+            let (r, _) = char('|')(input)?;
+            let (r, _) = ws(r)?;
+            let (r, l) = terminated(any_label_or_some, ws)(r)?;
+            let (r, ty) = opt(|input| {
+                let (r, _) = char(':')(input)?;
+                let (r, _) = ws1(r)?;
+                let (r, e) = expression(r)?;
+                Ok((r, e))
+            })(r)?;
+            let (r, _) = ws(r)?;
+            Ok((r, (l, ty)))
+        })(r)?;
+        let (r, _) = opt(preceded(char('|'), ws))(r)?;
+        let mut entries = vec![first];
+        entries.append(&mut more);
+        (r, entries)
+    } else {
+        (rest, vec![])
+    };
+    let mut map = BTreeMap::new();
+    for (l, ty) in entries {
+        if map.contains_key(&l) {
+            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+        }
+        map.insert(l, ty);
+    }
+    let (rest, _) = preceded(ws, char('>'))(rest)?;
+    Ok((rest, mkexpr(ExprKind::UnionType(map))))
 }
 
 // ── 7c. Empty list with type ─────────────────────────────────────────
@@ -912,37 +914,36 @@ fn selector_expression(input: &str) -> ParseResult<Expr> {
             let (r, _) = ws(r)?;
             let (r, sel) = alt((
                 // .{ x, y } — projection (with optional leading comma)
-                map(
-                    delimited(
-                        terminated(char('{'), ws),
-                        |input| {
-                            let (rest, has_leading) = opt(terminated(char(','), ws))(input)?;
-                            if let Ok((r, first)) = any_label_or_some(rest) {
-                                let (r, _) = ws(r)?;
-                                let (r, mut more) = many0(|input| {
-                                    let (r, _) = char(',')(input)?;
-                                    let (r, _) = ws(r)?;
-                                    let (r, l) = any_label_or_some(r)?;
-                                    let (r, _) = ws(r)?;
-                                    Ok((r, l))
-                                })(r)?;
-                                let (r, _) = opt(terminated(char(','), ws))(r)?;
-                                let mut ls = vec![first];
-                                ls.append(&mut more);
-                                Ok((r, ls))
-                            } else if has_leading.is_some() {
-                                Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
-                            } else {
-                                Ok((rest, vec![]))
-                            }
-                        },
-                        char('}'),
-                    ),
-                    |ls| {
-                        let set: BTreeSet<_> = ls.into_iter().collect();
-                        mkexpr(ExprKind::Op(crate::operations::OpKind::Projection(expr.clone(), set)))
-                    },
-                ),
+                |r| -> ParseResult<Expr> {
+                    let (r, _) = terminated(char('{'), ws)(r)?;
+                    let (r, has_leading) = opt(terminated(char(','), ws))(r)?;
+                    let (r, ls) = if let Ok((r2, first)) = any_label_or_some(r) {
+                        let (r2, _) = ws(r2)?;
+                        let (r2, mut more) = many0(|input| {
+                            let (r, _) = char(',')(input)?;
+                            let (r, _) = ws(r)?;
+                            let (r, l) = any_label_or_some(r)?;
+                            let (r, _) = ws(r)?;
+                            Ok((r, l))
+                        })(r2)?;
+                        let (r2, _) = opt(terminated(char(','), ws))(r2)?;
+                        let mut ls = vec![first];
+                        ls.append(&mut more);
+                        (r2, ls)
+                    } else if has_leading.is_some() {
+                        return Err(nom::Err::Error(nom::error::Error::new(r, nom::error::ErrorKind::Tag)));
+                    } else {
+                        (r, vec![])
+                    };
+                    let (r, _) = char('}')(r)?;
+                    let mut set = BTreeSet::new();
+                    for l in ls {
+                        if !set.insert(l) {
+                            return Err(nom::Err::Error(nom::error::Error::new(r, nom::error::ErrorKind::Verify)));
+                        }
+                    }
+                    Ok((r, mkexpr(ExprKind::Op(crate::operations::OpKind::Projection(expr.clone(), set)))))
+                },
                 // .(T) — projection by expression
                 map(
                     delimited(
