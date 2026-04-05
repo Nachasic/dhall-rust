@@ -1,1 +1,1 @@
-Unexpected trailing input: "(x)\n"
+Parse error: Error(Error { input: "Some(x)\n", code: Tag })

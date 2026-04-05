@@ -1,6 +1,1 @@
- --> 6:5
-  |
-6 | let Bool : Natural = 1 in Bool
-  |     ^---
-  |
-  = unexpected builtin
+Parse error: Error(Error { input: "let Bool : Natural = 1 in Bool\n", code: Tag })

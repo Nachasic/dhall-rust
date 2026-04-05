@@ -1,1 +1,1 @@
-Unexpected trailing input: ":T\n"
+Parse error: Error(Error { input: "[] :T\n", code: TakeWhile1 })

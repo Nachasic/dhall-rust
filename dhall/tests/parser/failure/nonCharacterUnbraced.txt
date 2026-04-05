@@ -1,6 +1,1 @@
- --> 6:3
-  |
-6 | "\uFFFE"
-  |   ^---^
-  |
-  = Escape sequences can't contain non-characters
+Parse error: Error(Error { input: "\"\\uFFFE\"\n", code: TakeWhile1 })
