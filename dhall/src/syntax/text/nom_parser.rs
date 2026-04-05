@@ -161,10 +161,10 @@ fn decimal_natural(input: &str) -> ParseResult<u64> {
 }
 
 fn integer_literal(input: &str) -> ParseResult<i64> {
-    map_res(
-        recognize(pair(one_of("+-"), digit1)),
-        |s: &str| s.parse::<i64>(),
-    )(input)
+    let (rest, sign) = one_of("+-")(input)?;
+    let (rest, n) = natural_literal(rest)?;
+    let val = if sign == '-' { -(n as i64) } else { n as i64 };
+    Ok((rest, val))
 }
 
 fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
@@ -253,7 +253,7 @@ fn double_quote_chunk(input: &str) -> ParseResult<InterpolatedTextContents<Expr>
     alt((
         // Interpolation: ${expr}
         map(
-            delimited(tag("${"), expression, char('}')),
+            delimited(tag("${"), expression, preceded(ws, char('}'))),
             InterpolatedTextContents::Expr,
         ),
         // Escape sequence
@@ -285,7 +285,7 @@ fn single_quote_chunk(input: &str) -> ParseResult<InterpolatedTextContents<Expr>
         value(InterpolatedTextContents::Text("${".to_owned()), tag("''${")),
         // Interpolation
         map(
-            delimited(tag("${"), expression, char('}')),
+            delimited(tag("${"), expression, preceded(ws, char('}'))),
             InterpolatedTextContents::Expr,
         ),
         // Plain text: anything that isn't '' or ${
@@ -430,7 +430,7 @@ fn nonreserved_label(input: &str) -> ParseResult<Label> {
 fn backtick_label(input: &str) -> ParseResult<Label> {
     delimited(
         char('`'),
-        map(take_while1(|c: char| c != '`'), Label::from),
+        map(take_while(|c: char| c != '`'), Label::from),
         char('`'),
     )(input)
 }
@@ -494,19 +494,35 @@ fn builtin_no_index(input: &str) -> ParseResult<Expr> {
 
 use crate::syntax::{FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
 
-/// Path component: /segment
-fn path_component(input: &str) -> ParseResult<String> {
-    preceded(
-        char('/'),
+/// Path component: /segment or /"quoted segment"
+/// A single path component without leading /
+fn path_component_body(input: &str) -> ParseResult<String> {
+    alt((
+        delimited(
+            char('"'),
+            map(
+                take_while1(|c: char| {
+                    let n = c as u32;
+                    (0x20..=0x21).contains(&n)
+                        || (0x23..=0x2E).contains(&n)
+                        || (0x30..=0x7F).contains(&n)
+                        || n > 0x7F
+                }),
+                |s: &str| s.to_owned(),
+            ),
+            char('"'),
+        ),
         map(
             take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
             |s: &str| s.to_owned(),
         ),
-    )(input)
+    ))(input)
 }
 
-/// Local path: ./foo/bar.dhall, ../foo, /abs/path, ~/home/path
-/// Match `/` as absolute path prefix, but not `/\` or `//` (which are operators).
+fn path_component(input: &str) -> ParseResult<String> {
+    preceded(char('/'), path_component_body)(input)
+}
+
 fn absolute_path_prefix(input: &str) -> ParseResult<FilePrefix> {
     let (rest, _) = char('/')(input)?;
     if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with(' ') {
@@ -524,28 +540,13 @@ fn local_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
         absolute_path_prefix,
     ))(input)?;
 
-    // For absolute paths, the first / was consumed by the prefix.
-    // We need to parse the first component without a leading /.
-    let (rest, components) = if prefix == FilePrefix::Absolute {
-        let (rest, first) = map(
-            take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
-            |s: &str| s.to_owned(),
-        )(rest)?;
-        let (rest, mut more) = many0(path_component)(rest)?;
-        let mut all = vec![first];
-        all.append(&mut more);
-        (rest, all)
-    } else {
-        // First component already has no leading /
-        let (rest, first) = map(
-            take_while1(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
-            |s: &str| s.to_owned(),
-        )(rest)?;
-        let (rest, mut more) = many0(path_component)(rest)?;
-        let mut all = vec![first];
-        all.append(&mut more);
-        (rest, all)
-    };
+    let (rest, first) = path_component_body(rest)?;
+    if prefix != FilePrefix::Absolute && first.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+    }
+    let (rest, mut more) = many0(path_component)(rest)?;
+    let mut components = vec![first];
+    components.append(&mut more);
 
     Ok((rest, ImportTarget::Local(prefix, FilePath { file_path: components })))
 }
@@ -563,8 +564,14 @@ fn http_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
         |s: &str| s.to_owned(),
     )(rest)?;
 
-    // Path segments
-    let (rest, segments) = many0(path_component)(rest)?;
+    // Path segments (URL paths allow percent-encoding)
+    let (rest, segments) = many0(preceded(
+        char('/'),
+        map(
+            take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@%".contains(c)),
+            |s: &str| s.to_owned(),
+        ),
+    ))(rest)?;
     let file_path = if segments.is_empty() { vec!["".to_owned()] } else { segments };
 
     // Optional query
@@ -2061,6 +2068,18 @@ mod tests {
     fn test_empty_record_trailing_comma() {
         let e = parse_expr("{ =, }");
         assert!(e.is_ok(), "empty record with trailing comma: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_printer_roundtrip_interpolation() {
+        let input = r#""${Natural/show 1}""#;
+        let e = parse_expr(input).unwrap();
+        let printed = e.to_string();
+        eprintln!("input:   {}", input);
+        eprintln!("printed: {}", printed);
+        let e2 = parse_expr(&printed);
+        assert!(e2.is_ok(), "re-parse failed: {:?}", e2.err());
+        assert_eq!(e.to_string(), e2.unwrap().to_string());
     }
 
     #[test]
