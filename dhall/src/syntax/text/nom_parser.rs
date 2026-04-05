@@ -45,6 +45,23 @@ fn mkexpr(kind: UnspannedExpr) -> Expr {
     Expr::new(kind, Span::Artificial)
 }
 
+/// Insert a record literal entry, merging duplicates with `∧`.
+fn insert_recordlit_entry(map: &mut std::collections::BTreeMap<Label, Expr>, l: Label, e: Expr) {
+    use std::collections::btree_map::Entry;
+    match map.entry(l) {
+        Entry::Vacant(entry) => { entry.insert(e); }
+        Entry::Occupied(mut entry) => {
+            let other = entry.insert(Expr::new(ExprKind::Num(crate::syntax::NumKind::Bool(false)), Span::Artificial));
+            entry.insert(Expr::new(
+                ExprKind::Op(crate::operations::OpKind::BinOp(
+                    crate::operations::BinOp::RecursiveRecordMerge, other, e,
+                )),
+                Span::Artificial,
+            ));
+        }
+    }
+}
+
 // ── 1. Whitespace and comments ───────────────────────────────────────
 
 /// Skip whitespace and line comments (-- to end of line)
@@ -127,6 +144,7 @@ fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
         value(NaiveDouble::from(f64::NAN), tag("NaN")),
         value(NaiveDouble::from(f64::INFINITY), tag("Infinity")),
         value(NaiveDouble::from(f64::NEG_INFINITY), tag("-Infinity")),
+        // With dot: 1.0, 1.0e5
         map_res(
             recognize(tuple((
                 opt(one_of("+-")),
@@ -134,6 +152,17 @@ fn double_literal(input: &str) -> ParseResult<NaiveDouble> {
                 tag("."),
                 digit1,
                 opt(recognize(tuple((one_of("eE"), opt(one_of("+-")), digit1)))),
+            ))),
+            |s: &str| s.parse::<f64>().map(NaiveDouble::from),
+        ),
+        // Without dot: 1e4, -1E+5
+        map_res(
+            recognize(tuple((
+                opt(one_of("+-")),
+                digit1,
+                one_of("eE"),
+                opt(one_of("+-")),
+                digit1,
             ))),
             |s: &str| s.parse::<f64>().map(NaiveDouble::from),
         ),
@@ -309,7 +338,7 @@ fn single_quote_literal(input: &str) -> ParseResult<InterpolatedText<Expr>> {
 /// Reserved words that cannot be used as labels.
 const RESERVED: &[&str] = &[
     "if", "then", "else", "let", "in", "using", "missing", "as",
-    "Infinity", "NaN", "merge", "Some", "toMap", "assert", "forall",
+    "Infinity", "NaN", "merge", "toMap", "assert", "forall",
     "with",
 ];
 
@@ -351,10 +380,9 @@ fn label(input: &str) -> ParseResult<Label> {
 
 fn variable(input: &str) -> ParseResult<V> {
     let (rest, l) = label(input)?;
-    // Optional @n index
     let (rest, idx) = opt(preceded(
         lexeme(char('@')),
-        lexeme(natural_literal),
+        lexeme(natural_literal), // natural_literal already handles 0x prefix
     ))(rest)?;
     Ok((rest, V(l, idx.unwrap_or(0) as usize)))
 }
@@ -576,8 +604,11 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
     delimited(
         lexeme(char('{')),
         alt((
-            // { = } — empty record literal
-            map(lexeme(char('=')), |_| mkexpr(ExprKind::RecordLit(Default::default()))),
+            // { = } or { , = } — empty record literal
+            map(
+                preceded(opt(lexeme(char(','))), lexeme(char('='))),
+                |_| mkexpr(ExprKind::RecordLit(Default::default())),
+            ),
             // Non-empty record (with optional leading/trailing commas)
             map(
                 |input| {
@@ -591,13 +622,14 @@ fn record_literal_or_type(input: &str) -> ParseResult<Expr> {
                         return mkexpr(ExprKind::RecordType(Default::default()));
                     }
                     let is_type = entries.iter().all(|(_, sep, _)| *sep == ':');
-                    let mut map = BTreeMap::new();
-                    for (l, _, e) in entries {
-                        map.insert(l, e);
-                    }
                     if is_type {
+                        let map: BTreeMap<_, _> = entries.into_iter().map(|(l, _, e)| (l, e)).collect();
                         mkexpr(ExprKind::RecordType(map))
                     } else {
+                        let mut map = BTreeMap::new();
+                        for (l, _, e) in entries {
+                            insert_recordlit_entry(&mut map, l, e);
+                        }
                         mkexpr(ExprKind::RecordLit(map))
                     }
                 },
@@ -673,6 +705,7 @@ fn union_type(input: &str) -> ParseResult<Expr> {
                     lexeme(char('|')),
                     pair(label, opt(preceded(lexeme(char(':')), expression))),
                 )(rest)?;
+                let (rest, _) = opt(lexeme(char('|')))(rest)?; // optional trailing |
                 Ok((rest, entries))
             },
             |entries: Vec<(Label, Option<Expr>)>| {
@@ -866,7 +899,7 @@ fn op_bool_eq(input: &str) -> ParseResult<crate::operations::BinOp> {
 }
 
 // Ordering matters: longer tokens must come first to avoid prefix matches.
-binop_level!(equiv_expr,                   import_alt_expr,    "===" => Equivalence);
+binop_level!(equiv_expr,                   import_alt_expr,    "===" => Equivalence, "≡" => Equivalence);
 binop_level!(import_alt_expr,              or_expr,            "?" => ImportAlt);
 binop_level!(or_expr,                      text_append_expr,   "||" => BoolOr);
 binop_level!(text_append_expr,             plus_expr,          "++" => TextAppend);
@@ -981,15 +1014,31 @@ fn operator_expression(input: &str) -> ParseResult<Expr> {
 // ── 10. Top-level expressions ────────────────────────────────────────
 
 fn let_expression(input: &str) -> ParseResult<Expr> {
-    let (rest, _) = lexeme(tag("let"))(input)?;
-    let (rest, name) = label(rest)?;
-    // Optional type annotation
-    let (rest, annot) = opt(preceded(lexeme(char(':')), expression))(rest)?;
-    let (rest, _) = lexeme(char('='))(rest)?;
-    let (rest, val) = expression(rest)?;
+    // Parse one or more let bindings followed by `in` and a body.
+    // `let x = 1 let y = 2 in x + y` is valid.
+    let (mut rest, _) = lexeme(tag("let"))(input)?;
+    let mut bindings = Vec::new();
+    loop {
+        let (r, name) = label(rest)?;
+        let (r, annot) = opt(preceded(lexeme(char(':')), expression))(r)?;
+        let (r, _) = lexeme(char('='))(r)?;
+        let (r, val) = expression(r)?;
+        bindings.push((name, annot, val));
+        rest = r;
+        // Check for another `let` or `in`
+        if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("let")(rest) {
+            let (r, _) = ws(r)?;
+            rest = r;
+        } else {
+            break;
+        }
+    }
     let (rest, _) = lexeme(tag("in"))(rest)?;
     let (rest, body) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Let(name, annot, val, body))))
+    let expr = bindings.into_iter().rev().fold(body, |acc, (name, annot, val)| {
+        mkexpr(ExprKind::Let(name, annot, val, acc))
+    });
+    Ok((rest, expr))
 }
 
 fn lambda_expression(input: &str) -> ParseResult<Expr> {
@@ -1113,12 +1162,11 @@ pub fn expression(input: &str) -> ParseResult<Expr> {
 
 /// Entry point: parse a complete Dhall expression.
 pub fn parse_expr(input: &str) -> Result<Expr, String> {
-    // Skip shebang line if present.
-    let input = if input.starts_with("#!") {
-        input.find('\n').map_or("", |i| &input[i + 1..])
-    } else {
-        input
-    };
+    // Skip shebang lines if present.
+    let mut input = input;
+    while input.starts_with("#!") {
+        input = input.find('\n').map_or("", |i| &input[i + 1..]);
+    }
     match expression(input.trim()) {
         Ok(("", expr)) => Ok(expr),
         Ok((rest, _)) => Err(format!("Unexpected trailing input: {:?}", rest)),
