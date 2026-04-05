@@ -381,6 +381,147 @@ fn builtin(input: &str) -> ParseResult<UnspannedExpr> {
     Ok((rest, expr))
 }
 
+// ── 4b. Imports ──────────────────────────────────────────────────────
+
+use crate::syntax::{FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
+
+/// Path component: /segment
+fn path_component(input: &str) -> ParseResult<String> {
+    preceded(
+        char('/'),
+        map(
+            take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
+            |s: &str| s.to_owned(),
+        ),
+    )(input)
+}
+
+/// Local path: ./foo/bar.dhall, ../foo, /abs/path, ~/home/path
+fn local_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
+    let (rest, prefix) = alt((
+        value(FilePrefix::Parent, tag("../")),
+        value(FilePrefix::Here, tag("./")),
+        value(FilePrefix::Home, tag("~/")),
+        value(FilePrefix::Absolute, tag("/")),
+    ))(input)?;
+
+    // For absolute paths, the first / was consumed by the prefix.
+    // We need to parse the first component without a leading /.
+    let (rest, components) = if prefix == FilePrefix::Absolute {
+        let (rest, first) = map(
+            take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
+            |s: &str| s.to_owned(),
+        )(rest)?;
+        let (rest, mut more) = many0(path_component)(rest)?;
+        let mut all = vec![first];
+        all.append(&mut more);
+        (rest, all)
+    } else {
+        // First component already has no leading /
+        let (rest, first) = map(
+            take_while1(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
+            |s: &str| s.to_owned(),
+        )(rest)?;
+        let (rest, mut more) = many0(path_component)(rest)?;
+        let mut all = vec![first];
+        all.append(&mut more);
+        (rest, all)
+    };
+
+    Ok((rest, ImportTarget::Local(prefix, FilePath { file_path: components })))
+}
+
+/// HTTP(S) import: https://example.com/foo/bar.dhall
+fn http_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
+    let (rest, scheme) = alt((
+        value(Scheme::HTTPS, tag("https://")),
+        value(Scheme::HTTP, tag("http://")),
+    ))(input)?;
+
+    // Authority: everything up to the first /
+    let (rest, authority) = map(
+        take_while1(|c: char| c != '/' && c != '?' && c != '#' && !c.is_whitespace()),
+        |s: &str| s.to_owned(),
+    )(rest)?;
+
+    // Path segments
+    let (rest, segments) = many0(path_component)(rest)?;
+    let file_path = if segments.is_empty() { vec!["".to_owned()] } else { segments };
+
+    // Optional query
+    let (rest, query) = opt(preceded(
+        char('?'),
+        map(take_while(|c: char| c != ' ' && c != '\n' && c != '\r'), |s: &str| s.to_owned()),
+    ))(rest)?;
+
+    Ok((rest, ImportTarget::Remote(URL {
+        scheme,
+        authority,
+        path: FilePath { file_path },
+        query,
+        headers: None,
+    })))
+}
+
+/// Environment variable import: env:NAME or env:"NAME"
+fn env_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
+    let (rest, _) = tag("env:")(input)?;
+    let (rest, name) = alt((
+        // Quoted: env:"NAME"
+        delimited(char('"'), map(take_while1(|c: char| c != '"'), |s: &str| s.to_owned()), char('"')),
+        // Unquoted: env:NAME
+        map(take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_'), |s: &str| s.to_owned()),
+    ))(rest)?;
+    Ok((rest, ImportTarget::Env(name)))
+}
+
+/// `missing` keyword
+fn missing_import(input: &str) -> ParseResult<ImportTarget<Expr>> {
+    let (rest, _) = tag("missing")(input)?;
+    // Make sure it's not a prefix of a longer identifier
+    if rest.starts_with(|c: char| is_label_char(c)) {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    Ok((rest, ImportTarget::Missing))
+}
+
+/// SHA256 hash: sha256:hex...
+fn import_hash(input: &str) -> ParseResult<Hash> {
+    let (rest, _) = tag("sha256:")(input)?;
+    let (rest, hex_str) = take_while1(|c: char| c.is_ascii_hexdigit())(rest)?;
+    let bytes = hex::decode(hex_str).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    Ok((rest, Hash::SHA256(bytes.into())))
+}
+
+/// Full import expression: location hash? (as Text | as Location)?
+fn import_expr(input: &str) -> ParseResult<Expr> {
+    let (rest, location) = lexeme(alt((
+        http_import,
+        local_import,
+        env_import,
+        missing_import,
+    )))(input)?;
+
+    let (rest, hash) = opt(lexeme(import_hash))(rest)?;
+
+    let (rest, mode) = opt(preceded(
+        lexeme(tag("as")),
+        lexeme(alt((
+            value(ImportMode::RawText, tag("Text")),
+            value(ImportMode::Location, tag("Location")),
+        ))),
+    ))(rest)?;
+
+    let import = crate::syntax::Import {
+        mode: mode.unwrap_or(ImportMode::Code),
+        location,
+        hash,
+    };
+    Ok((rest, mkexpr(ExprKind::Import(import))))
+}
+
 // ── 5. Atoms (primitive expressions) ─────────────────────────────────
 
 fn atom(input: &str) -> ParseResult<Expr> {
@@ -402,6 +543,8 @@ fn atom(input: &str) -> ParseResult<Expr> {
         record_literal_or_type,
         // List literal: [ ... ]
         list_literal,
+        // Imports (before builtins/variables — `missing`, `env:` look like identifiers)
+        import_expr,
         // Builtins and constants (must come before variable)
         map(builtin, mkexpr),
         // Variable
@@ -826,6 +969,85 @@ mod tests {
         let e = parse_expr("True || False && True").unwrap();
         let s = e.to_string();
         assert_eq!(s, "True || False && True");
+    }
+
+    // ── Import tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_import_here() {
+        let e = parse_expr("./config.dhall").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("config.dhall"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_parent() {
+        let e = parse_expr("../lib/utils.dhall").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("lib") && s.contains("utils.dhall"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_absolute() {
+        let e = parse_expr("/etc/config.dhall").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("etc") && s.contains("config.dhall"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_home() {
+        let e = parse_expr("~/.config/dhall/config.dhall").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("config.dhall"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_env() {
+        let e = parse_expr("env:HOME").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("env:HOME"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_env_quoted() {
+        let e = parse_expr(r#"env:"MY VAR""#).unwrap();
+        let s = e.to_string();
+        assert!(s.contains("MY VAR"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_missing() {
+        let e = parse_expr("missing").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("missing"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_http() {
+        let e = parse_expr("https://example.com/package.dhall").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("example.com") && s.contains("package.dhall"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_as_text() {
+        let e = parse_expr("./readme.md as Text").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("as Text"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_with_hash() {
+        let e = parse_expr("./config.dhall sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("sha256:"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_import_in_let() {
+        let e = parse_expr("let config = ./config.dhall in config").unwrap();
+        let s = e.to_string();
+        assert!(s.contains("let") && s.contains("config"), "got: {}", s);
     }
 
     #[test]
