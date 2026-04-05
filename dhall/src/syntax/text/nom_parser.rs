@@ -38,6 +38,9 @@ use crate::syntax::{
 
 type ParseResult<'a, T> = IResult<&'a str, T>;
 
+/// Error type compatible with the pest parser's public API.
+pub type ParseError = String;
+
 fn mkexpr(kind: UnspannedExpr) -> Expr {
     Expr::new(kind, Span::Artificial)
 }
@@ -1368,6 +1371,77 @@ mod tests {
         let e = parse_expr("{ a.b.c = True }").unwrap();
         let s = e.to_string();
         assert!(s.contains("a") && s.contains("b") && s.contains("c"), "got: {}", s);
+    }
+
+    // ── Known failures (from spec tests) ─────────────────────────
+
+    #[test]
+    fn test_trailing_comma_record_lit() {
+        let e = parse_expr("{ x = 1, y = 2, }");
+        assert!(e.is_ok(), "trailing comma in record literal: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_trailing_comma_record_type() {
+        let e = parse_expr("{ x : Natural, y : Natural, }");
+        assert!(e.is_ok(), "trailing comma in record type: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_leading_and_trailing_comma_record() {
+        let e = parse_expr("{ , x = 1, y = 2, }");
+        assert!(e.is_ok(), "leading+trailing comma in record: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_trailing_comma_list() {
+        let e = parse_expr("[1, 2, 3,]");
+        assert!(e.is_ok(), "trailing comma in list: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_leading_separator_union() {
+        let e = parse_expr("< | A | B >");
+        assert!(e.is_ok(), "leading | in union: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_empty_union_with_separator() {
+        let e = parse_expr("< | >");
+        assert!(e.is_ok(), "empty union with |: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_operator_combine_ascii() {
+        // /\ is the ASCII form of ∧
+        let e = parse_expr(r#"{ x = 1 } /\ { y = 2 }"#);
+        assert!(e.is_ok(), "combine /\\: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_operator_prefer_ascii() {
+        // // is the ASCII form of ⫽
+        let e = parse_expr(r#"{ x = 1 } // { x = 2 }"#);
+        assert!(e.is_ok(), "prefer //: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_operator_combine_types_ascii() {
+        // //\\ is the ASCII form of ⩓
+        let e = parse_expr(r#"{ x : Natural } //\\ { y : Text }"#);
+        assert!(e.is_ok(), "combine types //\\\\: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_shebang() {
+        let e = parse_expr("#!/usr/bin/env dhall\n42");
+        assert!(e.is_ok(), "shebang: {:?}", e.err());
+    }
+
+    #[test]
+    fn test_leading_comma_projection() {
+        let e = parse_expr("x.{ , a, b }");
+        assert!(e.is_ok(), "leading comma in projection: {:?}", e.err());
     }
 
     #[test]
