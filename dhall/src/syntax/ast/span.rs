@@ -87,5 +87,8 @@ fn char_idx_from_byte_idx(input: &str, idx: usize) -> usize {
         .enumerate()
         .find(|(_, byte_i)| *byte_i == idx)
         .map(|(char_i, _)| char_i)
-        .unwrap()
+        .unwrap_or_else(|| panic!(
+            "byte index {} not a char boundary in input len {}",
+            idx, input.len()
+        ))
 }

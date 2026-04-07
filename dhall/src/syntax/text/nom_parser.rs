@@ -63,7 +63,11 @@ struct Input<'a> {
 
 impl<'a> Input<'a> {
     fn new(input: &'a str, source: &'a Rc<str>) -> Self {
-        Input { fragment: input, full: &**source as *const str, source }
+        // IMPORTANT: fragment must point into the Rc's allocation, not the original &str,
+        // so that pointer arithmetic in offset() works correctly.
+        let rc_str: &'a str = &**source;
+        debug_assert_eq!(input.len(), rc_str.len());
+        Input { fragment: rc_str, full: rc_str as *const str, source }
     }
 
     /// Byte offset of the current fragment within the full source.
@@ -295,9 +299,19 @@ fn spanned(before: Input<'_>, after: Input<'_>, kind: UnspannedExpr) -> Expr {
     Expr::new(kind, after.span_since(before))
 }
 
-/// Like `spanned` but takes two existing expressions and unions their spans.
-fn spanned_union(a: &Expr, b: &Expr, kind: UnspannedExpr) -> Expr {
-    Expr::new(kind, a.span().union(&b.span()))
+/// Like `map`, but wraps the result in a spanned `Expr`.
+fn map_spanned<'a, O, F, G>(
+    mut parser: F,
+    f: G,
+) -> impl FnMut(Input<'a>) -> ParseResult<'a, Expr>
+where
+    F: FnMut(Input<'a>) -> ParseResult<'a, O>,
+    G: Fn(O) -> UnspannedExpr,
+{
+    move |input: Input<'a>| {
+        let (rest, val) = parser(input)?;
+        Ok((rest, spanned(input, rest, f(val))))
+    }
 }
 
 /// Parse a keyword, ensuring it's not a prefix of a longer identifier.
@@ -726,7 +740,7 @@ fn builtin_no_index(input: Input<'_>) -> ParseResult<'_, Expr> {
     if rest.starts_with_char('@') {
         Err(tag_err(input))
     } else {
-        Ok((rest, mkexpr(b)))
+        Ok((rest, spanned(input, rest, b)))
     }
 }
 
@@ -922,7 +936,7 @@ fn import_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         location,
         hash,
     };
-    Ok((rest, mkexpr(ExprKind::Import(import))))
+    Ok((rest, spanned(input, rest, ExprKind::Import(import))))
 }
 
 // ── 6. Atoms (primitive expressions) ─────────────────────────────────
@@ -936,12 +950,12 @@ fn atom(input: Input<'_>) -> ParseResult<'_, Expr> {
             preceded(ws, char(')')),
         ),
         // Numeric literals (order matters: double before natural)
-        map(double_literal, |n| mkexpr(ExprKind::Num(NumKind::Double(n)))),
-        map(integer_literal, |n| mkexpr(ExprKind::Num(NumKind::Integer(n)))),
-        map(natural_literal, |n| mkexpr(ExprKind::Num(NumKind::Natural(n)))),
+        map_spanned(double_literal, |n| ExprKind::Num(NumKind::Double(n))),
+        map_spanned(integer_literal, |n| ExprKind::Num(NumKind::Integer(n))),
+        map_spanned(natural_literal, |n| ExprKind::Num(NumKind::Natural(n))),
         // Text literal
-        map(double_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
-        map(single_quote_literal, |t| mkexpr(ExprKind::TextLit(t))),
+        map_spanned(double_quote_literal, |t| ExprKind::TextLit(t)),
+        map_spanned(single_quote_literal, |t| ExprKind::TextLit(t)),
         // Record literal/type: { ... }
         record_literal_or_type,
         // Union type: < ... >
@@ -953,7 +967,7 @@ fn atom(input: Input<'_>) -> ParseResult<'_, Expr> {
         // Builtins and constants (reject if followed by @ — that's invalid)
         builtin_no_index,
         // Variable
-        map(variable, |v| mkexpr(ExprKind::Var(v))),
+        map_spanned(variable, |v| ExprKind::Var(v)),
     )))(input)
 }
 
@@ -961,7 +975,7 @@ fn atom(input: Input<'_>) -> ParseResult<'_, Expr> {
 
 fn record_literal_or_type(input: Input<'_>) -> ParseResult<'_, Expr> {
     use alloc::collections::BTreeMap;
-    delimited(
+    let (rest, expr) = delimited(
         terminated(char('{'), ws),
         |input| {
             let (rest, _) = opt(terminated(char(','), ws))(input)?;
@@ -969,7 +983,7 @@ fn record_literal_or_type(input: Input<'_>) -> ParseResult<'_, Expr> {
             if rest.starts_with_char('=') {
                 let rest2 = Input { fragment: &rest.fragment[1..], ..rest };
                 let (rest2, _) = opt(preceded(ws, char(',')))(rest2)?;
-                return Ok((rest2, mkexpr(ExprKind::RecordLit(Default::default()))));
+                return Ok((rest2, ExprKind::RecordLit(Default::default())));
             }
             // Try non-empty record
             if let Ok((rest2, first)) = record_entry(rest) {
@@ -993,20 +1007,21 @@ fn record_literal_or_type(input: Input<'_>) -> ParseResult<'_, Expr> {
                         }
                         map.insert(l, e);
                     }
-                    return Ok((rest2, mkexpr(ExprKind::RecordType(map))));
+                    return Ok((rest2, ExprKind::RecordType(map)));
                 } else {
                     let mut map = BTreeMap::new();
                     for (l, _, e) in entries {
                         insert_recordlit_entry(&mut map, l, e);
                     }
-                    return Ok((rest2, mkexpr(ExprKind::RecordLit(map))));
+                    return Ok((rest2, ExprKind::RecordLit(map)));
                 }
             }
             // Empty record type {} or { , }
-            Ok((rest, mkexpr(ExprKind::RecordType(Default::default()))))
+            Ok((rest, ExprKind::RecordType(Default::default())))
         },
         preceded(ws, char('}')),
-    )(input)
+    )(input)?;
+    Ok((rest, spanned(input, rest, expr)))
 }
 
 /// Record entry: `name = expr`, `name : type`, `name` (pun), or `name.a.b = expr` (dotted).
@@ -1056,29 +1071,27 @@ fn record_entry(input: Input<'_>) -> ParseResult<'_, (Label, char, Expr)> {
 // ── 8. Lists ─────────────────────────────────────────────────────────
 
 fn list_literal(input: Input<'_>) -> ParseResult<'_, Expr> {
-    delimited(
+    let (rest, items) = delimited(
         terminated(char('['), ws),
-        map(
-            |input| {
-                let (rest, _) = opt(terminated(char(','), ws))(input)?;
-                let (rest, first) = expression(rest)?;
-                let (rest, _) = ws(rest)?;
-                let (rest, mut more) = many0(|input| {
-                    let (r, _) = char(',')(input)?;
-                    let (r, _) = ws(r)?;
-                    let (r, e) = expression(r)?;
-                    let (r, _) = ws(r)?;
-                    Ok((r, e))
-                })(rest)?;
-                let (rest, _) = opt(terminated(char(','), ws))(rest)?;
-                let mut items = vec![first];
-                items.append(&mut more);
-                Ok((rest, items))
-            },
-            |items| mkexpr(ExprKind::NEListLit(items)),
-        ),
+        |input| {
+            let (rest, _) = opt(terminated(char(','), ws))(input)?;
+            let (rest, first) = expression(rest)?;
+            let (rest, _) = ws(rest)?;
+            let (rest, mut more) = many0(|input| {
+                let (r, _) = char(',')(input)?;
+                let (r, _) = ws(r)?;
+                let (r, e) = expression(r)?;
+                let (r, _) = ws(r)?;
+                Ok((r, e))
+            })(rest)?;
+            let (rest, _) = opt(terminated(char(','), ws))(rest)?;
+            let mut items = vec![first];
+            items.append(&mut more);
+            Ok((rest, items))
+        },
         preceded(ws, char(']')),
-    )(input)
+    )(input)?;
+    Ok((rest, spanned(input, rest, ExprKind::NEListLit(items))))
 }
 
 // ── 8b. Union types ──────────────────────────────────────────────────
@@ -1120,7 +1133,7 @@ fn union_type(input: Input<'_>) -> ParseResult<'_, Expr> {
         map.insert(l, ty);
     }
     let (rest, _) = preceded(ws, char('>'))(rest)?;
-    Ok((rest, mkexpr(ExprKind::UnionType(map))))
+    Ok((rest, spanned(input, rest, ExprKind::UnionType(map))))
 }
 
 // ── 8c. Empty list with type ─────────────────────────────────────────
@@ -1132,7 +1145,7 @@ fn empty_list_literal(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = application(rest)?;
-    Ok((rest, mkexpr(ExprKind::EmptyListLit(ty))))
+    Ok((rest, spanned(input, rest, ExprKind::EmptyListLit(ty))))
 }
 
 // ── 9. Selector, completion, application ─────────────────────────────
@@ -1176,21 +1189,25 @@ fn selector_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
                             return Err(make_err(r, nom::error::ErrorKind::Verify));
                         }
                     }
-                    Ok((r, mkexpr(ExprKind::Op(OpKind::Projection(expr.clone(), set)))))
+                    let sp = expr.span().union(&rest.span_since(input));
+                    Ok((r, Expr::new(ExprKind::Op(OpKind::Projection(expr.clone(), set)), sp)))
                 },
                 // .(T) — projection by expression
-                map(
-                    delimited(
+                |r| {
+                    let (r, e) = delimited(
                         terminated(char('('), ws),
                         expression,
                         preceded(ws, char(')')),
-                    ),
-                    |e| mkexpr(ExprKind::Op(OpKind::ProjectionByExpr(expr.clone(), e))),
-                ),
+                    )(r)?;
+                    let sp = expr.span().union(&rest.span_since(input));
+                    Ok((r, Expr::new(ExprKind::Op(OpKind::ProjectionByExpr(expr.clone(), e)), sp)))
+                },
                 // .field — field access
-                map(label, |l| {
-                    mkexpr(ExprKind::Op(OpKind::Field(expr.clone(), l)))
-                }),
+                |r| {
+                    let (r, l) = label(r)?;
+                    let sp = expr.span().union(&rest.span_since(input));
+                    Ok((r, Expr::new(ExprKind::Op(OpKind::Field(expr.clone(), l)), sp)))
+                },
             ))(r)?;
             Ok((r, sel))
         })();
@@ -1211,7 +1228,7 @@ fn completion_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
             let (r, _) = tag("::")(r)?;
             let (r, _) = ws(r)?;
             let (r, rhs) = selector_expression(r)?;
-            Ok((r, mkexpr(ExprKind::Op(OpKind::Completion(expr.clone(), rhs)))))
+            Ok((r, { let sp = expr.span().union(&r.span_since(input)); Expr::new(ExprKind::Op(OpKind::Completion(expr.clone(), rhs)), sp) }))
         })();
         match tried {
             Ok((r, e)) => { expr = e; rest = r; }
@@ -1238,7 +1255,7 @@ fn some_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("Some")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, e) = import_expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::SomeLit(e))))
+    Ok((rest, spanned(input, rest, ExprKind::SomeLit(e))))
 }
 
 fn merge_application(input: Input<'_>) -> ParseResult<'_, Expr> {
@@ -1247,14 +1264,14 @@ fn merge_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, x) = import_expression(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, y) = import_expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::Merge(x, y, None)))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::Merge(x, y, None)))))
 }
 
 fn tomap_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("toMap")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::ToMap(x, None)))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::ToMap(x, None)))))
 }
 
 /// import-expression = import / completion-expression
@@ -1274,7 +1291,7 @@ fn application(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, arg)) => {
-                expr = mkexpr(ExprKind::Op(OpKind::App(expr, arg)));
+                { let sp = expr.span().union(&arg.span()); expr = Expr::new(ExprKind::Op(OpKind::App(expr, arg)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1305,7 +1322,7 @@ macro_rules! binop_level {
                 })();
                 match tried {
                     Ok((r, (op, rhs))) => {
-                        lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
+                        { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)), sp); }
                         rest = r;
                     }
                     Err(_) => break,
@@ -1330,7 +1347,7 @@ macro_rules! binop_level {
                 })();
                 match tried {
                     Ok((r, (op, rhs))) => {
-                        lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
+                        { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)), sp); }
                         rest = r;
                     }
                     Err(_) => break,
@@ -1368,7 +1385,7 @@ fn import_alt_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(ImportAlt, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(ImportAlt, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1399,7 +1416,7 @@ fn plus_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(NaturalPlus, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(NaturalPlus, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1426,7 +1443,7 @@ fn combine_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RecursiveRecordMerge, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(RecursiveRecordMerge, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1457,7 +1474,7 @@ fn prefer_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RightBiasedRecordMerge, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(RightBiasedRecordMerge, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1478,7 +1495,7 @@ fn combine_types_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, rhs)) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(RecursiveRecordTypeMerge, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(RecursiveRecordTypeMerge, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1500,7 +1517,7 @@ fn bool_eq_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, (op, rhs))) => {
-                lhs = mkexpr(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)));
+                { let sp = lhs.span().union(&rhs.span()); lhs = Expr::new(ExprKind::Op(OpKind::BinOp(op, lhs, rhs)), sp); }
                 rest = r;
             }
             Err(_) => break,
@@ -1545,7 +1562,7 @@ fn let_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = ws1(rest)?;
     let (rest, body) = expression(rest)?;
     let expr = bindings.into_iter().rev().fold(body, |acc, (name, annot, val)| {
-        mkexpr(ExprKind::Let(name, annot, val, acc))
+        spanned(input, rest, ExprKind::Let(name, annot, val, acc))
     });
     Ok((rest, expr))
 }
@@ -1565,7 +1582,7 @@ fn lambda_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("->"), tag("→")))(rest)?;
     let (rest, _) = ws(rest)?;
     let (rest, body) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Lam(name, ty, body))))
+    Ok((rest, spanned(input, rest, ExprKind::Lam(name, ty, body))))
 }
 
 fn if_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
@@ -1580,7 +1597,7 @@ fn if_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("else")(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, f) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::BoolIf(cond, t, f)))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::BoolIf(cond, t, f)))))
 }
 
 fn forall_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
@@ -1598,7 +1615,7 @@ fn forall_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("->"), tag("→")))(rest)?;
     let (rest, _) = ws(rest)?;
     let (rest, body) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Pi(name, ty, body))))
+    Ok((rest, spanned(input, rest, ExprKind::Pi(name, ty, body))))
 }
 
 fn assert_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
@@ -1607,7 +1624,7 @@ fn assert_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, e) = expression(rest)?;
-    Ok((rest, mkexpr(ExprKind::Assert(e))))
+    Ok((rest, spanned(input, rest, ExprKind::Assert(e))))
 }
 
 /// `merge x y : T` (with type annotation)
@@ -1621,7 +1638,7 @@ fn merge_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = application(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::Merge(x, y, Some(ty))))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::Merge(x, y, Some(ty))))))
 }
 
 /// `toMap x : T` (with type annotation)
@@ -1633,7 +1650,7 @@ fn tomap_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = char(':')(rest)?;
     let (rest, _) = ws1(rest)?;
     let (rest, ty) = application(rest)?;
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::ToMap(x, Some(ty))))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::ToMap(x, Some(ty))))))
 }
 
 /// `with` expression: `e with a.b.c = v`
@@ -1666,7 +1683,7 @@ fn with_clause(input: Input<'_>, base: Expr) -> ParseResult<'_, Expr> {
     let (rest, val) = operator_expression(rest)?;
     let mut labels = vec![first];
     labels.append(&mut more);
-    Ok((rest, mkexpr(ExprKind::Op(OpKind::With(base, labels, val)))))
+    Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::With(base, labels, val)))))
 }
 
 /// Arrow type: `A -> B` (non-dependent function type)
@@ -1680,7 +1697,7 @@ fn arrow_or_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
         let (r, _) = alt((tag("->"), tag("→")))(r)?;
         let (r, _) = ws(r)?;
         let (r, rhs) = expression(r)?;
-        Ok((r, mkexpr(ExprKind::Pi("_".into(), lhs.clone(), rhs))))
+        Ok((r, spanned(input, r, ExprKind::Pi("_".into(), lhs.clone(), rhs))))
     })();
     if let Ok((r, e)) = tried_arrow {
         return Ok((r, e));
@@ -1694,7 +1711,7 @@ fn arrow_or_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
         Ok((r, ty))
     })(rest)?;
     match annot {
-        Some(ty) => Ok((rest, mkexpr(ExprKind::Annot(lhs, ty)))),
+        Some(ty) => Ok((rest, spanned(input, rest, ExprKind::Annot(lhs, ty)))),
         None => Ok((rest, lhs)),
     }
 }

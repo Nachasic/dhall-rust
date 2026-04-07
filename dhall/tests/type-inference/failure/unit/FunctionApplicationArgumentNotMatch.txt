@@ -1,3 +1,9 @@
 Type error: error: wrong type of function argument
- = note: expected type `Natural`
-            found type `Bool`
+ --> <current file>:1:2
+  |
+1 | (λ(_ : Natural) → _) True
+  |  ^^^^^^^^^^^^^^^^^^ this expects an argument of type: Natural
+  |                      ^^^^ but this has type: Bool
+  |
+  = note: expected type `Natural`
+             found type `Bool`
