@@ -100,8 +100,8 @@ impl TestFile {
     /// Parse the target file
     pub fn parse(&self) -> Result<Parsed> {
         Ok(match self {
-            TestFile::Source(_) => Parsed::parse_file(&self.path())?,
-            TestFile::Binary(_) => Parsed::parse_binary_file(&self.path())?,
+            TestFile::Source(_) => dhall_engine::parse::parse_file(&self.path())?,
+            TestFile::Binary(_) => dhall_engine::parse::parse_binary_file(&self.path())?,
             TestFile::UI(_) => {
                 return Err(
                     TestError("Can't parse a UI test file".to_string()).into()

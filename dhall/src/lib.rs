@@ -24,11 +24,6 @@ pub mod semantics;
 pub mod syntax;
 pub mod utils;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-use std::path::Path;
-#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-use url::Url;
-
 use alloc::boxed::Box;
 
 use crate::error::{Error, TypeError};
@@ -75,20 +70,13 @@ impl Parsed {
         Parsed(e, ImportLocation::dhall_code_without_imports())
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-    pub fn parse_file(f: &Path) -> Result<Parsed, Error> {
-        parse::parse_file(f)
+    /// Construct from a pre-parsed expression and a base location.
+    pub fn from_expr(e: Expr, location: ImportLocation) -> Self {
+        Parsed(e, location)
     }
-    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-    pub fn parse_remote(url: Url) -> Result<Parsed, Error> {
-        parse::parse_remote(url)
-    }
+
     pub fn parse_str(s: &str) -> Result<Parsed, Error> {
         parse::parse_str(s)
-    }
-    #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-    pub fn parse_binary_file(f: &Path) -> Result<Parsed, Error> {
-        parse::parse_binary_file(f)
     }
     #[allow(dead_code)]
     pub fn parse_binary(data: &[u8]) -> Result<Parsed, Error> {

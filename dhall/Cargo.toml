@@ -30,11 +30,8 @@ percent-encoding = "2.1.0"
 sha2 = { version = "0.10.2", default-features = false }
 nom = { version = "7", default-features = false, features = ["alloc"] }
 
-# Reqwest needs proper async support to work on wasm. So no remote imports on
-# wasm for now.
+# URL type still needed for ImportLocationKind::Remote
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.11", features = ["blocking"], optional = true }
-home = "0.5.3"
 url = "2.1"
 
 [dev-dependencies]
