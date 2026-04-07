@@ -207,6 +207,7 @@ dependencies = [
  "annotate-snippets",
  "anyhow",
  "colored-diff",
+ "dhall_engine",
  "fs_extra",
  "half 2.1.0",
  "hashbrown 0.14.5",
@@ -231,6 +232,10 @@ version = "0.1.0"
 dependencies = [
  "dhall",
  "hashbrown 0.14.5",
+ "home",
+ "itertools",
+ "reqwest",
+ "url",
 ]
 
 [[package]]
@@ -1068,6 +1073,7 @@ name = "serde_dhall"
 version = "0.13.0"
 dependencies = [
  "dhall",
+ "dhall_engine",
  "dhall_proc_macros",
  "doc-comment",
  "serde",
