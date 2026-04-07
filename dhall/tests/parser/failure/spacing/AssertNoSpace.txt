@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "assert :T\n", code: Tag })
+ --> 1:1
+  |
+1 | assert :T
+  | ^---
+  |
+  = expected expression

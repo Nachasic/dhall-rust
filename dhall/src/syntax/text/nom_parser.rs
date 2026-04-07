@@ -27,6 +27,7 @@ use nom::{
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, multispace0, one_of},
     combinator::{map, map_res, opt, recognize, value},
+    error::context,
     multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded, terminated, tuple},
     IResult,
@@ -41,7 +42,20 @@ use crate::syntax::{Const, FilePath, FilePrefix, Hash, ImportMode, ImportTarget,
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-type ParseResult<'a, T> = IResult<&'a str, T>;
+type VerboseError<'a> = nom::error::VerboseError<&'a str>;
+type ParseResult<'a, T> = IResult<&'a str, T, VerboseError<'a>>;
+
+/// Create a VerboseError at the given input position.
+fn make_err(input: &str, kind: nom::error::ErrorKind) -> nom::Err<VerboseError<'_>> {
+    nom::Err::Error(nom::error::VerboseError {
+        errors: alloc::vec![(input, nom::error::VerboseErrorKind::Nom(kind))],
+    })
+}
+
+/// Shorthand for a simple tag-like error.
+fn tag_err(input: &str) -> nom::Err<VerboseError<'_>> {
+    make_err(input, nom::error::ErrorKind::Tag)
+}
 
 /// Error type for the public API.
 pub type ParseError = String;
@@ -55,7 +69,7 @@ fn keyword<'a>(kw: &'static str) -> impl FnMut(&'a str) -> ParseResult<'a, &'a s
     move |input: &'a str| {
         let (rest, matched) = tag(kw)(input)?;
         if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
-            Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+            Err(tag_err(input))
         } else {
             Ok((rest, matched))
         }
@@ -86,13 +100,14 @@ fn insert_recordlit_entry(map: &mut alloc::collections::BTreeMap<Label, Expr>, l
 fn ws(input: &str) -> ParseResult<'_, ()> {
     let mut rest = input;
     loop {
-        let (r, _) = multispace0(rest)?;
+        let (r, _) = multispace0::<_, VerboseError<'_>>(rest)?;
         rest = r;
-        if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("--")(rest) {
-            let (r, _) = take_while(|c: char| c != '\n')(r)?;
+        if rest.starts_with("--") {
+            rest = &rest[2..];
+            let (r, _) = take_while::<_, _, VerboseError<'_>>(|c: char| c != '\n')(rest)?;
             rest = r;
-        } else if let Ok((r, _)) = tag::<_, _, nom::error::Error<&str>>("{-")(rest) {
-            rest = block_comment(r)?;
+        } else if rest.starts_with("{-") {
+            rest = block_comment(&rest[2..])?;
         } else {
             break;
         }
@@ -102,27 +117,21 @@ fn ws(input: &str) -> ParseResult<'_, ()> {
 
 /// Consume the body of a block comment (after the opening `{-`).
 /// Handles nesting: each `{-` inside must be matched by a `-}`.
-fn block_comment(input: &str) -> Result<&str, nom::Err<nom::error::Error<&str>>> {
+fn block_comment(input: &str) -> Result<&str, nom::Err<VerboseError<'_>>> {
     let mut rest = input;
     loop {
-        // Look for {- (nested) or -} (close)
         match rest.find("{-").map(|i| (i, true)).into_iter()
             .chain(rest.find("-}").map(|i| (i, false)))
             .min_by_key(|(i, _)| *i)
         {
             Some((i, true)) => {
-                // Nested block comment — recurse past the `{-`
                 rest = block_comment(&rest[i + 2..])?;
             }
             Some((i, false)) => {
-                // Closing -}
                 return Ok(&rest[i + 2..]);
             }
             None => {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Tag,
-                )));
+                return Err(tag_err(input));
             }
         }
     }
@@ -133,8 +142,7 @@ fn ws1(input: &str) -> ParseResult<'_, ()> {
     let start = input;
     let (rest, _) = ws(input)?;
     if rest.len() == start.len() {
-        // No whitespace consumed
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Space)))
+        Err(make_err(input, nom::error::ErrorKind::Space))
     } else {
         Ok((rest, ()))
     }
@@ -157,11 +165,11 @@ fn natural_literal(input: &str) -> ParseResult<'_, u64> {
 fn decimal_natural(input: &str) -> ParseResult<'_, u64> {
     let (rest, s) = digit1(input)?;
     if s.len() > 1 && s.starts_with('0') {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        Err(tag_err(input))
     } else {
         s.parse::<u64>()
             .map(|n| (rest, n))
-            .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+            .map_err(|_| tag_err(input))
     }
 }
 
@@ -408,10 +416,7 @@ fn simple_label(input: &str) -> ParseResult<'_, Label> {
     ))(input)?;
 
     if RESERVED.contains(&name) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
+        return Err(tag_err(input));
     }
 
     Ok((rest, Label::from(name)))
@@ -424,10 +429,7 @@ fn nonreserved_label(input: &str) -> ParseResult<'_, Label> {
     }
     let (rest, l) = simple_label(input)?;
     if is_builtin_name(l.as_ref()) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
+        return Err(tag_err(input));
     }
     Ok((rest, l))
 }
@@ -477,10 +479,7 @@ fn builtin(input: &str) -> ParseResult<'_, UnspannedExpr> {
         "Sort" => ExprKind::Const(Const::Sort),
         _ => match crate::builtins::Builtin::parse(name) {
             Some(b) => ExprKind::Builtin(b),
-            None => return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            ))),
+            None => return Err(tag_err(input)),
         },
     };
     Ok((rest, expr))
@@ -489,7 +488,7 @@ fn builtin(input: &str) -> ParseResult<'_, UnspannedExpr> {
 fn builtin_no_index(input: &str) -> ParseResult<'_, Expr> {
     let (rest, b) = builtin(input)?;
     if rest.starts_with('@') {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        Err(tag_err(input))
     } else {
         Ok((rest, mkexpr(b)))
     }
@@ -529,7 +528,7 @@ fn path_component(input: &str) -> ParseResult<'_, String> {
 fn absolute_path_prefix(input: &str) -> ParseResult<'_, FilePrefix> {
     let (rest, _) = char('/')(input)?;
     if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with(' ') {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        Err(tag_err(input))
     } else {
         Ok((rest, FilePrefix::Absolute))
     }
@@ -545,7 +544,7 @@ fn local_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
 
     let (rest, first) = path_component_body(rest)?;
     if prefix != FilePrefix::Absolute && first.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+        return Err(make_err(input, nom::error::ErrorKind::TakeWhile1));
     }
     let (rest, mut more) = many0(path_component)(rest)?;
     let mut components = vec![first];
@@ -638,7 +637,7 @@ fn posix_env_var(input: &str) -> ParseResult<'_, String> {
         }),
     )))(input)?;
     if chars.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+        return Err(make_err(input, nom::error::ErrorKind::TakeWhile1));
     }
     Ok((rest, chars.into_iter().collect()))
 }
@@ -647,7 +646,7 @@ fn posix_env_var(input: &str) -> ParseResult<'_, String> {
 fn missing_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
     let (rest, _) = tag("missing")(input)?;
     if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+        return Err(tag_err(input));
     }
     Ok((rest, ImportTarget::Missing))
 }
@@ -656,9 +655,7 @@ fn missing_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
 fn import_hash(input: &str) -> ParseResult<'_, Hash> {
     let (rest, _) = tag("sha256:")(input)?;
     let (rest, hex_str) = take_while1(|c: char| c.is_ascii_hexdigit())(rest)?;
-    let bytes = hex::decode(hex_str).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
+    let bytes = hex::decode(hex_str).map_err(|_| tag_err(input))?;
     Ok((rest, Hash::SHA256(bytes.into())))
 }
 
@@ -695,7 +692,7 @@ fn import_expr(input: &str) -> ParseResult<'_, Expr> {
 // ── 6. Atoms (primitive expressions) ─────────────────────────────────
 
 fn atom(input: &str) -> ParseResult<'_, Expr> {
-    alt((
+    context("expression", alt((
         // Parenthesized expression
         delimited(
             terminated(char('('), ws),
@@ -721,7 +718,7 @@ fn atom(input: &str) -> ParseResult<'_, Expr> {
         builtin_no_index,
         // Variable
         map(variable, |v| mkexpr(ExprKind::Var(v))),
-    ))(input)
+    )))(input)
 }
 
 // ── 7. Records ───────────────────────────────────────────────────────
@@ -733,7 +730,8 @@ fn record_literal_or_type(input: &str) -> ParseResult<'_, Expr> {
         |input| {
             let (rest, _) = opt(terminated(char(','), ws))(input)?;
             // Try empty record literal: = [,]
-            if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('=')(rest) {
+            if rest.starts_with('=') {
+                let rest2 = &rest[1..];
                 let (rest2, _) = opt(preceded(ws, char(',')))(rest2)?;
                 return Ok((rest2, mkexpr(ExprKind::RecordLit(Default::default()))));
             }
@@ -755,7 +753,7 @@ fn record_literal_or_type(input: &str) -> ParseResult<'_, Expr> {
                     let mut map = BTreeMap::new();
                     for (l, _, e) in entries {
                         if map.contains_key(&l) {
-                            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+                            return Err(make_err(input, nom::error::ErrorKind::Verify));
                         }
                         map.insert(l, e);
                     }
@@ -780,7 +778,8 @@ fn record_entry(input: &str) -> ParseResult<'_, (Label, char, Expr)> {
     let (rest, first_label) = terminated(any_label_or_some, ws)(input)?;
 
     // Try dotted field syntax: name.a.b = expr
-    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('.')(rest) {
+    if rest.starts_with('.') {
+        let rest2 = &rest[1..];
         let (rest2, _) = ws(rest2)?;
         // Collect remaining dot-separated labels
         let (rest2, more_labels) = separated_list0(
@@ -800,12 +799,14 @@ fn record_entry(input: &str) -> ParseResult<'_, (Label, char, Expr)> {
     }
 
     // Try `name = expr` or `name : type`
-    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>('=')(rest) {
+    if rest.starts_with('=') {
+        let rest2 = &rest[1..];
         let (rest2, _) = ws(rest2)?;
         let (rest2, val) = expression(rest2)?;
         return Ok((rest2, (first_label, '=', val)));
     }
-    if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>(':')(rest) {
+    if rest.starts_with(':') {
+        let rest2 = &rest[1..];
         let (rest2, _) = ws1(rest2)?;
         let (rest2, val) = expression(rest2)?;
         return Ok((rest2, (first_label, ':', val)));
@@ -878,7 +879,7 @@ fn union_type(input: &str) -> ParseResult<'_, Expr> {
     let mut map = BTreeMap::new();
     for (l, ty) in entries {
         if map.contains_key(&l) {
-            return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+            return Err(make_err(input, nom::error::ErrorKind::Verify));
         }
         map.insert(l, ty);
     }
@@ -928,7 +929,7 @@ fn selector_expression(input: &str) -> ParseResult<'_, Expr> {
                         ls.append(&mut more);
                         (r2, ls)
                     } else if has_leading.is_some() {
-                        return Err(nom::Err::Error(nom::error::Error::new(r, nom::error::ErrorKind::Tag)));
+                        return Err(tag_err(r));
                     } else {
                         (r, vec![])
                     };
@@ -936,7 +937,7 @@ fn selector_expression(input: &str) -> ParseResult<'_, Expr> {
                     let mut set = BTreeSet::new();
                     for l in ls {
                         if !set.insert(l) {
-                            return Err(nom::Err::Error(nom::error::Error::new(r, nom::error::ErrorKind::Verify)));
+                            return Err(make_err(r, nom::error::ErrorKind::Verify));
                         }
                     }
                     Ok((r, mkexpr(ExprKind::Op(OpKind::Projection(expr.clone(), set)))))
@@ -1108,7 +1109,7 @@ macro_rules! binop_level {
 fn op_bool_eq(input: &str) -> ParseResult<'_, BinOp> {
     let (rest, _) = tag("==")(input)?;
     if rest.starts_with('=') {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        Err(tag_err(input))
     } else {
         Ok((rest, BoolEQ))
     }
@@ -1154,7 +1155,7 @@ fn plus_expr(input: &str) -> ParseResult<'_, Expr> {
             let (r, _) = char('+')(r)?;
             // Reject ++ (that's text append)
             if r.starts_with('+') {
-                return Err(nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Tag)));
+                return Err(tag_err(rest));
             }
             let (r, _) = ws1(r)?;
             let (r, rhs) = list_append_expr(r)?;
@@ -1202,7 +1203,7 @@ fn combine_expr(input: &str) -> ParseResult<'_, Expr> {
 fn op_prefer_ascii(input: &str) -> ParseResult<'_, &str> {
     let (rest, _) = tag("//")(input)?;
     if rest.starts_with('\\') {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)))
+        Err(tag_err(input))
     } else {
         Ok((rest, "//"))
     }
@@ -1488,9 +1489,82 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
     let mut complete = terminated(expression, ws);
     match complete(input) {
         Ok(("", expr)) => Ok(expr),
-        Ok((rest, _)) => Err(format!("Unexpected trailing input: {:?}", rest)),
-        Err(e) => Err(format!("Parse error: {:?}", e)),
+        Ok((rest, _)) => {
+            let consumed = input.len() - rest.len();
+            let before = &input[..consumed];
+            let line = before.chars().filter(|&c| c == '\n').count() + 1;
+            let last_nl = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let col = before[last_nl..].chars().count() + 1;
+            Err(format!(" --> {}:{}\n  |\n  = unexpected trailing input", line, col))
+        }
+        Err(e) => {
+            let e = match e {
+                nom::Err::Error(e) | nom::Err::Failure(e) => e,
+                nom::Err::Incomplete(_) => unreachable!("complete parsers"),
+            };
+            Err(format_verbose_error(input, &e))
+        }
     }
+}
+
+/// Format a VerboseError into a human-readable message with line/column info,
+/// source context, and a caret pointing at the error position.
+fn format_verbose_error(input: &str, err: &nom::error::VerboseError<&str>) -> String {
+    use nom::error::VerboseErrorKind;
+
+    // Find the deepest (most specific) error position
+    let (err_input, kind) = err.errors.iter()
+        .rev()
+        .find(|(_, k)| matches!(k, VerboseErrorKind::Context(_)))
+        .or_else(|| err.errors.last())
+        .unwrap_or(&err.errors[0]);
+
+    let offset = input.len() - err_input.len();
+    let prefix = &input[..offset];
+    let line = prefix.chars().filter(|&c| c == '\n').count() + 1;
+    let last_nl = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = prefix[last_nl..].chars().count() + 1;
+
+    // Extract the source line
+    let line_start = last_nl;
+    let line_end = input[offset..].find('\n').map(|i| offset + i).unwrap_or(input.len());
+    let source_line = &input[line_start..line_end];
+
+    // Build the caret indicator
+    let caret_offset = col - 1;
+    let caret = format!("{}^---", " ".repeat(caret_offset));
+
+    // Build the "expected" message from context labels
+    let contexts: Vec<&str> = err.errors.iter()
+        .filter_map(|(_, k)| match k {
+            VerboseErrorKind::Context(ctx) => Some(*ctx),
+            _ => None,
+        })
+        .collect();
+
+    let line_num_width = format!("{}", line).len();
+    let padding = " ".repeat(line_num_width);
+
+    let mut msg = format!(
+        " --> {}:{}\n{} |\n{} | {}\n{} | {}\n{} |",
+        line, col, padding, line, source_line, padding, caret, padding
+    );
+
+    if !contexts.is_empty() {
+        let mut unique = contexts.clone();
+        unique.dedup();
+        msg.push_str(&format!("\n{} = expected {}", padding, unique.join(", ")));
+    } else {
+        // Fall back to the nom error kind
+        let hint = match kind {
+            VerboseErrorKind::Nom(k) => format!("{:?}", k),
+            VerboseErrorKind::Char(c) => format!("'{}'", c),
+            VerboseErrorKind::Context(c) => c.to_string(),
+        };
+        msg.push_str(&format!("\n{} = expected {}", padding, hint));
+    }
+
+    msg
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "let x = y in(e)\n", code: Tag })
+ --> 1:1
+  |
+1 | let x = y in(e)
+  | ^---
+  |
+  = expected expression

@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "forall(x :T) -> x\n", code: Tag })
+ --> 1:1
+  |
+1 | forall(x :T) -> x
+  | ^---
+  |
+  = expected expression

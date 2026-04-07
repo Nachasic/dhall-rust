@@ -1,1 +1,3 @@
-Unexpected trailing input: "= y in e\n"
+ --> 1:6
+  |
+  = unexpected trailing input

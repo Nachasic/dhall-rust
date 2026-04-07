@@ -1,1 +1,3 @@
-Unexpected trailing input: "using(x)\n"
+ --> 1:25
+  |
+  = unexpected trailing input
