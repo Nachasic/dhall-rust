@@ -72,56 +72,58 @@ impl Engine {
     }
 
     pub fn eval_str(&self, input: &str) -> Result<dhall::syntax::Expr, dhall::error::Error> {
-        if self.builtins.is_empty() {
-            return Ctxt::with_new(|cx| {
-                let nir = self.resolve_and_normalize(cx, Parsed::parse_str(input)?)?;
-                Ok(nir.to_expr(cx, Default::default()))
-            });
-        }
-
         let entries = self.builtins.clone();
 
         Ctxt::with_new_custom(entries, |cx| {
             let parsed = Parsed::parse_str(input)?;
-            let resolved = self.resolve(cx, parsed)?;
-            let expr = resolved.to_expr(cx);
+            let name_env = self.build_name_env();
+            let resolved = self.resolve_with_names(cx, parsed, &name_env)?;
 
-            // Build Hir with builtin names in scope.
-            let mut name_env = dhall::semantics::NameEnv::new();
-            for b in &self.builtins {
-                name_env.insert_mut(&Label::from(b.name.as_str()));
-            }
-            let hir = dhall::expr_to_hir(&expr, &mut name_env);
-
-            // Build TyEnv with custom builtins and their types.
-            let mut ty_env = TyEnv::new(cx);
-            for (i, b) in self.builtins.iter().enumerate() {
-                let type_hir = Parsed::parse_str(&b.type_sig)?
-                    .skip_resolve(cx)?
-                    .typecheck(cx)?
-                    .as_hir()
-                    .clone();
-                let ty = type_with(&ty_env, &type_hir, None)?.eval_to_type(&ty_env)?;
-                let nir = Nir::from_kind(NirKind::CustomBuiltin(cx, i, Vec::new()));
-                ty_env = ty_env.insert_value(&Label::from(b.name.as_str()), nir, ty);
+            if self.builtins.is_empty() {
+                let typed = resolved.typecheck(cx)?;
+                return Ok(typed.normalize(cx).to_expr(cx));
             }
 
-            // Typecheck the user expression in the enriched environment.
-            let typed = type_with(&ty_env, &hir, None)?;
-            let nir = typed.eval(ty_env.to_nzenv());
+            let ty_env = self.build_ty_env(cx)?;
+            let typed = resolved.typecheck_with_env(&ty_env)?;
+            let nir = typed.eval_to_nir(&ty_env.to_nzenv());
             Ok(nir.to_expr(cx, Default::default()))
         })
     }
 
-    fn resolve<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<dhall::Resolved<'cx>, dhall::error::Error> {
-        match &self.fetcher {
-            Some(f) => p.resolve_with_fetcher(cx, Box::new(ArcFetcher(Arc::clone(f)))),
-            None => p.resolve(cx),
+    fn build_name_env(&self) -> dhall::semantics::NameEnv {
+        let mut env = dhall::semantics::NameEnv::new();
+        for b in &self.builtins {
+            env.insert_mut(&Label::from(b.name.as_str()));
         }
+        env
     }
 
-    fn resolve_and_normalize<'cx>(&self, cx: Ctxt<'cx>, p: Parsed) -> Result<Nir<'cx>, dhall::error::Error> {
-        Ok(self.resolve(cx, p)?.typecheck(cx)?.normalize(cx).as_nir().clone())
+    fn build_ty_env<'cx>(&self, cx: Ctxt<'cx>) -> Result<TyEnv<'cx>, dhall::error::Error> {
+        let mut ty_env = TyEnv::new(cx);
+        for (i, b) in self.builtins.iter().enumerate() {
+            let type_hir = Parsed::parse_str(&b.type_sig)?
+                .skip_resolve(cx)?
+                .typecheck(cx)?
+                .as_hir()
+                .clone();
+            let ty = type_with(&ty_env, &type_hir, None)?.eval_to_type(&ty_env)?;
+            let nir = Nir::from_kind(NirKind::CustomBuiltin(cx, i, Vec::new()));
+            ty_env = ty_env.insert_value(&Label::from(b.name.as_str()), nir, ty);
+        }
+        Ok(ty_env)
+    }
+
+    fn resolve_with_names<'cx>(
+        &self,
+        cx: Ctxt<'cx>,
+        p: Parsed,
+        names: &dhall::semantics::NameEnv,
+    ) -> Result<dhall::Resolved<'cx>, dhall::error::Error> {
+        match &self.fetcher {
+            Some(f) => p.resolve_with_names_and_fetcher(cx, names, Box::new(ArcFetcher(Arc::clone(f)))),
+            None => p.resolve_with_names(cx, names),
+        }
     }
 }
 
