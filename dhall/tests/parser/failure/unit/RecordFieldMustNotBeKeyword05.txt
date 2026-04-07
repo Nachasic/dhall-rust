@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "{ using: Text }\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | { using: Text }
+  | ^---
+  |
+  = expected expression

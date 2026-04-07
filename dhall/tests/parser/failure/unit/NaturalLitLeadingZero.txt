@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "042\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | 042
+  | ^---
+  |
+  = expected expression

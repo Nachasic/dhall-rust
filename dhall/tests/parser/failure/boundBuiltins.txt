@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "let Bool : Natural = 1 in Bool\n", code: Tag })
+ --> 6:1
+  |
+6 | let Bool : Natural = 1 in Bool
+  | ^---
+  |
+  = expected expression

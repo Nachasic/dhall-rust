@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "\"\\uD800\"\n", code: TakeWhile1 })
+ --> 5:1
+  |
+5 | "\uD800"
+  | ^---
+  |
+  = expected expression

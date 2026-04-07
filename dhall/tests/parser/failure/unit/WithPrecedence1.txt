@@ -1,1 +1,3 @@
-Unexpected trailing input: "with x = 1\n"
+ --> 1:24
+  |
+  = unexpected trailing input

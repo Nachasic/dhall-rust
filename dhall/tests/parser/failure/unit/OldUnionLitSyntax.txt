@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "< x = 3 | y : Bool >\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | < x = 3 | y : Bool >
+  | ^---
+  |
+  = expected expression

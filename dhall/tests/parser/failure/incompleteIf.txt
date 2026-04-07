@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "if a then b else\n", code: Tag })
+ --> 10:1
+   |
+10 | if a then b else
+   | ^---
+   |
+   = expected expression

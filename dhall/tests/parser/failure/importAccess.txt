@@ -1,1 +1,3 @@
-Unexpected trailing input: ".hello\n"
+ --> 1:14
+  |
+  = unexpected trailing input

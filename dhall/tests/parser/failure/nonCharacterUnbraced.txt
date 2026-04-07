@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "\"\\uFFFE\"\n", code: TakeWhile1 })
+ --> 6:1
+  |
+6 | "\uFFFE"
+  | ^---
+  |
+  = expected expression

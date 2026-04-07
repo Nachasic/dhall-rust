@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "<x | x>\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | <x | x>
+  | ^---
+  |
+  = expected expression

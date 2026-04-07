@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "{ merge: Text }\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | { merge: Text }
+  | ^---
+  |
+  = expected expression

@@ -1,1 +1,3 @@
-Unexpected trailing input: "\"a%20b\"/c\n"
+ --> 1:21
+  |
+  = unexpected trailing input

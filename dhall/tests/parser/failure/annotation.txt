@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "let a:Natural = 1 in a\n", code: Tag })
+ --> 1:1
+  |
+1 | let a:Natural = 1 in a
+  | ^---
+  |
+  = expected expression

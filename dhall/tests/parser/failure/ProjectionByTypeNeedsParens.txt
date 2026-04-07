@@ -1,1 +1,3 @@
-Unexpected trailing input: ".{ x: T }\n"
+ --> 1:2
+  |
+  = unexpected trailing input

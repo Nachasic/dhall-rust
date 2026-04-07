@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "Some\n", code: Tag })
+ --> 1:1
+  |
+1 | Some
+  | ^---
+  |
+  = expected expression

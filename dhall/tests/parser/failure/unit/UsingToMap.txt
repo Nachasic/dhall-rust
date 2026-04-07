@@ -1,1 +1,3 @@
-Unexpected trailing input: "using toMap { Foo = \"Bar\" }\n"
+ --> 8:21
+  |
+  = unexpected trailing input

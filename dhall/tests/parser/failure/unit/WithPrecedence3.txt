@@ -1,1 +1,3 @@
-Unexpected trailing input: ": T\n"
+ --> 1:22
+  |
+  = unexpected trailing input

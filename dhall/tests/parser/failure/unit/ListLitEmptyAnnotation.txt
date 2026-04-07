@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "([]) : List T\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | ([]) : List T
+  | ^---
+  |
+  = expected expression

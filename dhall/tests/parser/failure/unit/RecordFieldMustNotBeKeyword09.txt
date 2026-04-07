@@ -1,1 +1,6 @@
-Parse error: Error(Error { input: "{ Infinity: Text }\n", code: TakeWhile1 })
+ --> 1:1
+  |
+1 | { Infinity: Text }
+  | ^---
+  |
+  = expected expression
