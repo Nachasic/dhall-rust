@@ -199,6 +199,10 @@ impl<'cx> Resolved<'cx> {
     pub fn to_expr(&self, cx: Ctxt<'cx>) -> Expr {
         self.0.to_expr_noopts(cx)
     }
+    /// Access the inner `Hir` for direct traversal or lazy evaluation.
+    pub fn as_hir(&self) -> &Hir<'cx> {
+        &self.0
+    }
 }
 
 impl<'cx> Typed<'cx> {
