@@ -996,7 +996,9 @@ fn record_literal_or_type(input: Input<'_>) -> ParseResult<'_, Expr> {
                     let mut map = BTreeMap::new();
                     for (l, _, e) in entries {
                         if map.contains_key(&l) {
-                            return Err(make_err(input, nom::error::ErrorKind::Verify));
+                            return Err(nom::Err::Failure(nom::error::VerboseError {
+                                errors: alloc::vec![(input, nom::error::VerboseErrorKind::Context("Duplicate field in record type"))],
+                            }));
                         }
                         map.insert(l, e);
                     }
