@@ -1,39 +1,33 @@
-use itertools::Itertools;
 use alloc::borrow::Cow;
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::env;
-#[cfg(feature = "std")]
-use std::path::{Path, PathBuf};
-#[cfg(not(target_arch = "wasm32"))]
-use url::Url;
+use alloc::boxed::Box;
 
 use crate::builtins::Builtin;
 use crate::error::ErrorBuilder;
-use crate::error::{Error, ImportError};
+use crate::error::Error;
 use crate::operations::{BinOp, OpKind};
-use crate::semantics::{mkerr, Hir, HirKind, ImportEnv, ImportFetcher, NameEnv, Type};
+use crate::semantics::{mkerr, Hir, HirKind, ImportEnv, ImportFetcher, NameEnv, NoImports, Type};
 use crate::syntax;
 use crate::syntax::{
-    Expr, ExprKind, FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Span,
+    Expr, ExprKind, FilePath, ImportMode, ImportTarget, Span,
     UnspannedExpr, URL,
 };
 use crate::{
     Ctxt, ImportAlternativeId, ImportId, ImportResultId, Parsed, Resolved,
     Typed,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use url::Url;
 
 // TODO: evaluate import headers
 pub type Import = syntax::Import<()>;
 
 /// Path representation: `PathBuf` when `std` is available, `String` otherwise.
 #[cfg(feature = "std")]
-pub type LocalPath = PathBuf;
+pub type LocalPath = std::path::PathBuf;
 #[cfg(not(feature = "std"))]
 pub type LocalPath = String;
 
@@ -64,119 +58,45 @@ impl ImportLocation {
     pub fn kind(&self) -> &ImportLocationKind { &self.kind }
     pub fn mode(&self) -> ImportMode { self.mode }
 
+    /// Create an import location from a kind and mode.
+    pub fn new(kind: ImportLocationKind, mode: ImportMode) -> Self {
+        ImportLocation { kind, mode }
+    }
+
     /// Create a local file import location.
     pub fn local(path: LocalPath, mode: ImportMode) -> Self {
         ImportLocation { kind: ImportLocationKind::Local(path), mode }
     }
+
+    pub fn dhall_code_of_unknown_origin() -> Self {
+        ImportLocation {
+            kind: ImportLocationKind::Missing,
+            mode: ImportMode::Code,
+        }
+    }
+    pub fn dhall_code_without_imports() -> Self {
+        ImportLocation {
+            kind: ImportLocationKind::NoImport,
+            mode: ImportMode::Code,
+        }
+    }
+    pub fn local_dhall_code(path: LocalPath) -> Self {
+        ImportLocation {
+            kind: ImportLocationKind::Local(path),
+            mode: ImportMode::Code,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn remote_dhall_code(url: Url) -> Self {
+        ImportLocation {
+            kind: ImportLocationKind::Remote(url),
+            mode: ImportMode::Code,
+        }
+    }
 }
 
 impl ImportLocationKind {
-    #[cfg(feature = "std")]
-    fn chain_local(
-        &self,
-        prefix: FilePrefix,
-        path: &FilePath,
-    ) -> Result<Self, Error> {
-        Ok(match self {
-            ImportLocationKind::Local(..)
-            | ImportLocationKind::Env(..)
-            | ImportLocationKind::Missing => {
-                let dir = match self {
-                    ImportLocationKind::Local(path) => {
-                        path.parent().unwrap().to_owned()
-                    }
-                    ImportLocationKind::Env(..)
-                    | ImportLocationKind::Missing => std::env::current_dir()?,
-                    _ => unreachable!(),
-                };
-                let mut dir: Vec<String> = dir
-                    .components()
-                    .map(|component| {
-                        component.as_os_str().to_string_lossy().into_owned()
-                    })
-                    .collect();
-                let root = match prefix {
-                    FilePrefix::Here => dir,
-                    FilePrefix::Parent => {
-                        dir.push("..".to_string());
-                        dir
-                    }
-                    FilePrefix::Absolute => vec![],
-                    FilePrefix::Home => vec![],
-                };
-                let path: Vec<_> = root
-                    .into_iter()
-                    .chain(path.file_path.iter().cloned())
-                    .collect();
-                let path =
-                    (FilePath { file_path: path }).canonicalize().file_path;
-                let prefix = match prefix {
-                    FilePrefix::Here | FilePrefix::Parent => ".",
-                    FilePrefix::Absolute => "/",
-                    FilePrefix::Home => "~",
-                };
-                let path =
-                    Some(prefix.to_string()).into_iter().chain(path).collect();
-                ImportLocationKind::Local(path)
-            }
-            ImportLocationKind::Remote(url) => {
-                let mut url = url.clone();
-                match prefix {
-                    FilePrefix::Here => {}
-                    FilePrefix::Parent => {
-                        url = url.join("..")?;
-                    }
-                    FilePrefix::Absolute => panic!("error"),
-                    FilePrefix::Home => panic!("error"),
-                }
-                url = url.join(&path.file_path.join("/"))?;
-                ImportLocationKind::Remote(url)
-            }
-            ImportLocationKind::NoImport => unreachable!(),
-        })
-    }
-
-    #[cfg(feature = "std")]
-    fn fetch_dhall(&self) -> Result<Parsed, Error> {
-        Ok(match self {
-            ImportLocationKind::Local(path) => Parsed::parse_file(path)?,
-            ImportLocationKind::Remote(url) => {
-                Parsed::parse_remote(url.clone())?
-            }
-            ImportLocationKind::Env(var_name) => {
-                let val = match env::var(var_name) {
-                    Ok(val) => val,
-                    Err(_) => return Err(ImportError::MissingEnvVar.into()),
-                };
-                Parsed::parse_str(&val)?
-            }
-            ImportLocationKind::Missing => {
-                return Err(ImportError::Missing.into())
-            }
-            ImportLocationKind::NoImport => unreachable!(),
-        })
-    }
-
-    #[cfg(feature = "std")]
-    fn fetch_text(&self) -> Result<String, Error> {
-        Ok(match self {
-            ImportLocationKind::Local(path) => {
-                let path = resolve_home(path)?;
-                std::fs::read_to_string(path)?
-            }
-            ImportLocationKind::Remote(url) => download_http_text(url.clone())?,
-            ImportLocationKind::Env(var_name) => match env::var(var_name) {
-                Ok(val) => val,
-                Err(_) => return Err(ImportError::MissingEnvVar.into()),
-            },
-            ImportLocationKind::Missing => {
-                return Err(ImportError::Missing.into())
-            }
-            ImportLocationKind::NoImport => unreachable!(),
-        })
-    }
-
-    fn to_location(&self) -> Expr {
+    pub fn to_location(&self) -> Expr {
         let (field_name, arg) = match self {
             ImportLocationKind::Local(path) => {
                 #[cfg(feature = "std")]
@@ -209,171 +129,8 @@ impl ImportLocationKind {
     }
 }
 
-impl ImportLocation {
-    pub fn dhall_code_of_unknown_origin() -> Self {
-        ImportLocation {
-            kind: ImportLocationKind::Missing,
-            mode: ImportMode::Code,
-        }
-    }
-    pub fn dhall_code_without_imports() -> Self {
-        ImportLocation {
-            kind: ImportLocationKind::NoImport,
-            mode: ImportMode::Code,
-        }
-    }
-    pub fn local_dhall_code(path: LocalPath) -> Self {
-        ImportLocation {
-            kind: ImportLocationKind::Local(path),
-            mode: ImportMode::Code,
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn remote_dhall_code(url: Url) -> Self {
-        ImportLocation {
-            kind: ImportLocationKind::Remote(url),
-            mode: ImportMode::Code,
-        }
-    }
-
-    /// Given an import pointing to `target` found in the current location, compute the next
-    /// location, or error if not allowed.
-    /// `sanity_check` indicates whether to check if that location is allowed to be referenced,
-    /// for example to prevent a remote file from reading an environment variable.
-    #[cfg(feature = "std")]
-    fn chain(&self, import: &Import) -> Result<ImportLocation, Error> {
-        // Makes no sense to chain an import if the current file is not a dhall file.
-        assert!(matches!(self.mode, ImportMode::Code));
-        if matches!(self.kind, ImportLocationKind::NoImport) {
-            Err(ImportError::UnexpectedImport(import.clone()))?;
-        }
-
-        let kind = match &import.location {
-            ImportTarget::Local(prefix, path) => {
-                self.kind.chain_local(*prefix, path)?
-            }
-            ImportTarget::Remote(remote) => {
-                if matches!(self.kind, ImportLocationKind::Remote(..))
-                    && !matches!(import.mode, ImportMode::Location)
-                {
-                    // TODO: allow if CORS check passes
-                    return Err(ImportError::SanityCheck.into());
-                }
-                let mut url = Url::parse(&format!(
-                    "{}://{}",
-                    remote.scheme, remote.authority
-                ))?;
-                url.set_path(&remote.path.file_path.iter().join("/"));
-                url.set_query(remote.query.as_ref().map(String::as_ref));
-                ImportLocationKind::Remote(url)
-            }
-            ImportTarget::Env(var_name) => {
-                if matches!(self.kind, ImportLocationKind::Remote(..))
-                    && !matches!(import.mode, ImportMode::Location)
-                {
-                    return Err(ImportError::SanityCheck.into());
-                }
-                ImportLocationKind::Env(var_name.clone())
-            }
-            ImportTarget::Missing => ImportLocationKind::Missing,
-        };
-        Ok(ImportLocation {
-            kind,
-            mode: import.mode,
-        })
-    }
-
-    /// Fetches the expression corresponding to this location.
-    #[cfg(feature = "std")]
-    fn fetch<'cx>(
-        &self,
-        env: &mut ImportEnv<'cx>,
-        span: Span,
-    ) -> Result<Typed<'cx>, Error> {
-        let cx = env.cx();
-
-        // Check custom fetcher first.
-        if let Some(fetcher) = env.fetcher() {
-            if let Some(result) = fetcher.fetch(self) {
-                let source = result?;
-                let typed = match self.mode {
-                    ImportMode::Code => {
-                        let parsed = Parsed::parse_str(&source)?;
-                        let typed = parsed.resolve_with_env(env)?.typecheck(cx)?;
-                        Typed {
-                            hir: typed.normalize(cx).to_hir(),
-                            ty: typed.ty,
-                        }
-                    }
-                    ImportMode::RawText => Typed {
-                        hir: Hir::new(
-                            HirKind::Expr(ExprKind::TextLit(source.into())),
-                            span.clone(),
-                        ),
-                        ty: Type::from_builtin(cx, Builtin::Text),
-                    },
-                    ImportMode::Location => {
-                        let expr = self.kind.to_location();
-                        Parsed::from_expr_without_imports(expr)
-                            .resolve(cx)
-                            .unwrap()
-                            .typecheck(cx)
-                            .unwrap()
-                    }
-                };
-                return Ok(typed);
-            }
-        }
-
-        // Default fetch.
-        let typed = match self.mode {
-            ImportMode::Code => {
-                let parsed = self.kind.fetch_dhall()?;
-                let typed = parsed.resolve_with_env(env)?.typecheck(cx)?;
-                Typed {
-                    hir: typed.normalize(cx).to_hir(),
-                    ty: typed.ty,
-                }
-            }
-            ImportMode::RawText => {
-                let text = self.kind.fetch_text()?;
-                Typed {
-                    hir: Hir::new(
-                        HirKind::Expr(ExprKind::TextLit(text.into())),
-                        span,
-                    ),
-                    ty: Type::from_builtin(cx, Builtin::Text),
-                }
-            }
-            ImportMode::Location => {
-                let expr = self.kind.to_location();
-                Parsed::from_expr_without_imports(expr)
-                    .resolve(cx)
-                    .unwrap()
-                    .typecheck(cx)
-                    .unwrap()
-            }
-        };
-        Ok(typed)
-    }
-}
-
 fn mkexpr(kind: UnspannedExpr) -> Expr {
     Expr::new(kind, Span::Artificial)
-}
-
-// TODO: error handling
-#[cfg(all(not(target_arch = "wasm32"), feature = "std", feature = "reqwest"))]
-pub(crate) fn download_http_text(url: Url) -> Result<String, Error> {
-    Ok(reqwest::blocking::get(url).unwrap().text().unwrap())
-}
-#[cfg(all(not(target_arch = "wasm32"), feature = "std", not(feature = "reqwest")))]
-pub(crate) fn download_http_text(_url: Url) -> Result<String, Error> {
-    panic!("Remote imports are disabled in this build of dhall-rust")
-}
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn download_http_text(_url: String) -> Result<String, Error> {
-    panic!("Remote imports are not supported on wasm yet")
 }
 
 fn make_aslocation_uniontype() -> Expr {
@@ -392,7 +149,7 @@ pub fn check_hash<'cx>(
     result: ImportResultId<'cx>,
 ) -> Result<(), Error> {
     let import = &cx[import];
-    if let (ImportMode::Code, Some(Hash::SHA256(hash))) =
+    if let (ImportMode::Code, Some(syntax::Hash::SHA256(hash))) =
         (import.import.mode, &import.import.hash)
     {
         let expr = cx[result].hir.to_expr_alpha(cx);
@@ -451,39 +208,33 @@ fn fetch_import<'cx>(
     let import = &cx[import_id].import;
     let span = cx[import_id].span.clone();
 
-    // Check custom fetcher for path resolution, fall back to default.
-    let location = match env.fetcher().and_then(|f| f.chain(&cx[import_id].base_location, import)) {
-        Some(result) => result?,
-        None => {
-            #[cfg(feature = "std")]
-            { cx[import_id].base_location.chain(import)? }
-            #[cfg(not(feature = "std"))]
-            { return Err(ImportError::Missing.into()); }
-        }
-    };
+    let location = env.fetcher().chain(&cx[import_id].base_location, import)?;
 
-    // If the hash is in the on-disk cache, return
-    // the cached contents.
+    // If the hash is in the on-disk cache, return the cached contents.
     if let Some(typed) = env.get_from_disk_cache(&import.hash) {
         let res_id = cx.push_import_result(typed);
         return Ok(res_id);
     }
 
-    // If the import is in the in-memory cache return the cached contents. Otherwise fetch the
-    // import.
+    // If the import is in the in-memory cache return the cached contents.
+    // Otherwise fetch the import.
     let res_id = if let Some(res_id) = env.get_from_mem_cache(&location) {
         res_id
     } else {
-        // Resolve this import, making sure that recursive imports don't cycle back to the
-        // current one.
         let res = env.with_cycle_detection(location.clone(), |env| {
-            // Check custom fetcher first.
-            if let Some(fetcher) = env.fetcher() {
-                if let Some(result) = fetcher.fetch(&location) {
-                    let source = result?;
-                    let typed = match location.mode {
+            let typed = match location.mode {
+                ImportMode::Location => {
+                    let expr = location.kind.to_location();
+                    Parsed::from_expr_without_imports(expr)
+                        .skip_resolve(cx)?
+                        .typecheck(cx)?
+                }
+                _ => {
+                    let source = env.fetcher().fetch(&location)?;
+                    match location.mode {
                         ImportMode::Code => {
-                            let parsed = Parsed::parse_str(&source)?;
+                            let expr = crate::syntax::parse_expr(&source)?;
+                            let parsed = Parsed(expr, location.clone());
                             let typed = resolve_with_env(env, parsed)?.typecheck(cx)?;
                             Typed {
                                 hir: typed.normalize(cx).to_hir(),
@@ -495,25 +246,13 @@ fn fetch_import<'cx>(
                                 HirKind::Expr(ExprKind::TextLit(source.into())),
                                 span.clone(),
                             ),
-                            ty: Type::from_builtin(cx, crate::builtins::Builtin::Text),
+                            ty: Type::from_builtin(cx, Builtin::Text),
                         },
-                        ImportMode::Location => {
-                            let expr = location.kind.to_location();
-                            Parsed::from_expr_without_imports(expr)
-                                .skip_resolve(cx)
-                                .unwrap()
-                                .typecheck(cx)
-                                .unwrap()
-                        }
-                    };
-                    return Ok(typed);
+                        ImportMode::Location => unreachable!(),
+                    }
                 }
-            }
-
-            #[cfg(feature = "std")]
-            { location.fetch(env, span.clone()) }
-            #[cfg(not(feature = "std"))]
-            { Err(ImportError::Missing.into()) }
+            };
+            Ok(typed)
         });
         let typed = match res {
             Ok(typed) => typed,
@@ -525,7 +264,6 @@ fn fetch_import<'cx>(
         };
 
         let res_id = cx.push_import_result(typed);
-        // Cache the mapping from this location to the result.
         env.write_to_mem_cache(location, res_id);
         res_id
     };
@@ -646,8 +384,6 @@ fn resolve_with_env<'cx>(
 }
 
 /// Like `resolve_with_env`, but starts with extra names already in scope.
-/// This allows the caller to inject custom bindings (e.g. custom builtins)
-/// so that the resulting `Hir` resolves them as variables instead of `MissingVar`.
 pub fn resolve_with_env_and_names<'cx>(
     env: &mut ImportEnv<'cx>,
     parsed: Parsed,
@@ -667,41 +403,23 @@ pub fn resolve_with_env_and_names<'cx>(
     Ok(Resolved(resolved))
 }
 
-/// Resolves all imports and names. Returns errors if importing failed. Name errors are deferred to
-/// typechecking.
-pub fn resolve<'cx>(
-    cx: Ctxt<'cx>,
-    parsed: Parsed,
-) -> Result<Resolved<'cx>, Error> {
-    parsed.resolve_with_env(&mut ImportEnv::new(cx))
-}
-
-/// Like `resolve`, but uses a custom fetcher for import resolution.
+/// Resolve using a custom fetcher.
 pub fn resolve_with_fetcher<'cx>(
     cx: Ctxt<'cx>,
     parsed: Parsed,
     fetcher: Box<dyn ImportFetcher>,
 ) -> Result<Resolved<'cx>, Error> {
-    parsed.resolve_with_env(&mut ImportEnv::with_fetcher(cx, fetcher))
+    parsed.resolve_with_env(&mut ImportEnv::new(cx, fetcher))
 }
 
-/// Like `resolve`, but with extra names pre-populated in the environment.
-pub fn resolve_with_names<'cx>(
-    cx: Ctxt<'cx>,
-    parsed: Parsed,
-    names: &NameEnv,
-) -> Result<Resolved<'cx>, Error> {
-    resolve_with_env_and_names(&mut ImportEnv::new(cx), parsed, names)
-}
-
-/// Like `resolve_with_names`, but also uses a custom fetcher.
+/// Resolve with extra names and a custom fetcher.
 pub fn resolve_with_names_and_fetcher<'cx>(
     cx: Ctxt<'cx>,
     parsed: Parsed,
     names: &NameEnv,
     fetcher: Box<dyn ImportFetcher>,
 ) -> Result<Resolved<'cx>, Error> {
-    resolve_with_env_and_names(&mut ImportEnv::with_fetcher(cx, fetcher), parsed, names)
+    resolve_with_env_and_names(&mut ImportEnv::new(cx, fetcher), parsed, names)
 }
 
 /// Resolves names, and errors if we find any imports.
@@ -710,7 +428,7 @@ pub fn skip_resolve<'cx>(
     parsed: Parsed,
 ) -> Result<Resolved<'cx>, Error> {
     let parsed = Parsed::from_expr_without_imports(parsed.0);
-    resolve(cx, parsed)
+    resolve_with_fetcher(cx, parsed, Box::new(NoImports))
 }
 
 impl Parsed {
@@ -732,62 +450,20 @@ impl Canonicalize for FilePath {
 
         for c in &self.file_path {
             match c.as_ref() {
-                // canonicalize(directory₀) = directory₁
-                // ───────────────────────────────────────
-                // canonicalize(directory₀/.) = directory₁
                 "." => continue,
                 ".." => match file_path.last() {
-                    // canonicalize(directory₀) = ε
-                    // ────────────────────────────
-                    // canonicalize(directory₀/..) = /..
                     None => file_path.push("..".to_string()),
-
-                    // canonicalize(directory₀) = directory₁/..
-                    // ──────────────────────────────────────────────
-                    // canonicalize(directory₀/..) = directory₁/../..
                     Some(c) if c == ".." => file_path.push("..".to_string()),
-
-                    // canonicalize(directory₀) = directory₁/component
-                    // ───────────────────────────────────────────────  ; If "component" is not
-                    // canonicalize(directory₀/..) = directory₁         ; ".."
                     Some(_) => {
                         file_path.pop();
                     }
                 },
-
-                // canonicalize(directory₀) = directory₁
-                // ─────────────────────────────────────────────────────────  ; If no other
-                // canonicalize(directory₀/component) = directory₁/component  ; rule matches
                 _ => file_path.push(c.clone()),
             }
         }
 
         FilePath { file_path }
     }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-pub(crate) fn resolve_home(path: impl AsRef<Path>) -> Result<PathBuf, Error> {
-    let mut f = PathBuf::new();
-
-    match path.as_ref().strip_prefix("~") {
-        Ok(rest) => {
-            let home = home::home_dir()
-                .ok_or_else(|| Error::from(ImportError::MissingHome))?;
-            f.push(home);
-            f.push(rest);
-        }
-        Err(_) => {
-            f.push(path);
-        }
-    }
-
-    Ok(f)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn resolve_home(_path: impl AsRef<Path>) -> Result<PathBuf, Error> {
-    panic!("Imports relative to home are not supported on wasm yet");
 }
 
 impl<SE: Copy> Canonicalize for ImportTarget<SE> {

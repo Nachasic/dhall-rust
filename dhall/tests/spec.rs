@@ -111,7 +111,7 @@ impl TestFile {
     }
     /// Parse and resolve the target file
     pub fn resolve<'cx>(&self, cx: Ctxt<'cx>) -> Result<Resolved<'cx>> {
-        Ok(self.parse()?.resolve(cx)?)
+        Ok(self.parse()?.resolve_with_fetcher(cx, Box::new(dhall_engine::DefaultFetcher))?)
     }
     /// Parse, resolve and tck the target file
     pub fn typecheck<'cx>(&self, cx: Ctxt<'cx>) -> Result<Typed<'cx>> {

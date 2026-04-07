@@ -35,7 +35,7 @@ use crate::error::{Error, TypeError};
 use crate::semantics::parse;
 use crate::semantics::resolve;
 use crate::semantics::resolve::ImportLocation;
-use crate::semantics::{typecheck, typecheck_with, Hir, Nir, Tir, Type};
+use crate::semantics::{typecheck, typecheck_with, Hir, ImportFetcher, Nir, Tir, Type};
 use crate::syntax::Expr;
 
 pub use ctxt::*;
@@ -95,35 +95,22 @@ impl Parsed {
         parse::parse_binary(data)
     }
 
-    pub fn resolve<'cx>(self, cx: Ctxt<'cx>) -> Result<Resolved<'cx>, Error> {
-        resolve::resolve(cx, self)
-    }
-
     pub fn resolve_with_fetcher<'cx>(
         self,
         cx: Ctxt<'cx>,
-        fetcher: Box<dyn semantics::ImportFetcher>,
+        fetcher: Box<dyn ImportFetcher>,
     ) -> Result<Resolved<'cx>, Error> {
         resolve::resolve_with_fetcher(cx, self, fetcher)
     }
 
-    /// Resolve with extra names pre-populated in the environment.
+    /// Like `resolve_with_fetcher`, but also pre-populates extra names.
     /// Custom builtin names should be inserted into `names` so the
     /// resulting `Hir` resolves them as variables instead of `MissingVar`.
-    pub fn resolve_with_names<'cx>(
-        self,
-        cx: Ctxt<'cx>,
-        names: &semantics::NameEnv,
-    ) -> Result<Resolved<'cx>, Error> {
-        resolve::resolve_with_names(cx, self, names)
-    }
-
-    /// Like `resolve_with_names`, but also uses a custom import fetcher.
     pub fn resolve_with_names_and_fetcher<'cx>(
         self,
         cx: Ctxt<'cx>,
         names: &semantics::NameEnv,
-        fetcher: Box<dyn semantics::ImportFetcher>,
+        fetcher: Box<dyn ImportFetcher>,
     ) -> Result<Resolved<'cx>, Error> {
         resolve::resolve_with_names_and_fetcher(cx, self, names, fetcher)
     }

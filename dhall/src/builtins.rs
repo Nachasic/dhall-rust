@@ -258,7 +258,7 @@ pub fn type_of_builtin<'cx>(cx: Ctxt<'cx>, b: Builtin) -> Hir<'cx> {
         ),
     };
     Parsed::from_expr_without_imports(expr)
-        .resolve(cx)
+        .skip_resolve(cx)
         .unwrap()
         .0
 }
@@ -331,7 +331,7 @@ fn apply_builtin<'cx>(
     }
     let make_closure = |e| {
         Parsed::from_expr_without_imports(e)
-            .resolve(cx)
+            .skip_resolve(cx)
             .unwrap()
             .typecheck(cx)
             .unwrap()

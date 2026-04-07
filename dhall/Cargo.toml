@@ -11,7 +11,7 @@ edition = "2018"
 include = ["src/**/*", "README.md"]
 
 [features]
-default = [ "std", "reqwest" ]
+default = [ "std" ]
 std = [ "annotate-snippets", "itertools/use_std" ]
 
 [[test]]
@@ -40,6 +40,7 @@ url = "2.1"
 [dev-dependencies]
 anyhow = "1.0.28"
 colored-diff = "0.2.2"
+dhall_engine = { path = "../dhall_engine" }
 fs_extra = "1.2.0"
 libtest-mimic = "0.5.0"
 rand = "0.8"

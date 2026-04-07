@@ -6,29 +6,43 @@ use alloc::vec::Vec;
 use crate::error::{Error, ImportError};
 #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 use crate::semantics::Cache;
-use crate::semantics::{check_hash, AlphaVar, ImportLocation, VarEnv};
+use crate::semantics::{check_hash, AlphaVar, ImportLocation, ImportLocationKind, VarEnv};
 use crate::syntax::{Hash, Label, V};
 use crate::{Ctxt, ImportId, ImportResultId, Typed};
 
-/// Trait for custom import fetching. Implement this to resolve imports
-/// from sources other than the filesystem/HTTP (e.g. in-memory, virtual FS).
-///
-/// Receives the full `ImportLocation` for each import. Return `None`
-/// from any method to fall back to the default behavior.
+/// Trait for import fetching. The fetcher is fully responsible for
+/// resolving import paths and fetching their content — there is no
+/// built-in fallback I/O in the `dhall` crate.
 pub trait ImportFetcher {
     /// Resolve an import path relative to a base location.
-    /// Return `None` to use default path resolution (filesystem-based).
     fn chain(
         &self,
-        _base: &ImportLocation,
-        _import: &crate::semantics::Import,
-    ) -> Option<Result<ImportLocation, Error>> {
-        None
-    }
+        base: &ImportLocation,
+        import: &crate::semantics::Import,
+    ) -> Result<ImportLocation, Error>;
 
     /// Fetch content for a resolved location.
-    /// Return `None` to use default I/O (filesystem/HTTP).
-    fn fetch(&self, location: &ImportLocation) -> Option<Result<String, Error>>;
+    fn fetch(&self, location: &ImportLocation) -> Result<String, Error>;
+}
+
+/// A fetcher that rejects all imports. Used by `skip_resolve`.
+pub struct NoImports;
+
+impl ImportFetcher for NoImports {
+    fn chain(
+        &self,
+        base: &ImportLocation,
+        import: &crate::semantics::Import,
+    ) -> Result<ImportLocation, Error> {
+        if matches!(base.kind(), ImportLocationKind::NoImport) {
+            Err(ImportError::UnexpectedImport(import.clone()).into())
+        } else {
+            Err(ImportError::Missing.into())
+        }
+    }
+    fn fetch(&self, _location: &ImportLocation) -> Result<String, Error> {
+        Err(ImportError::Missing.into())
+    }
 }
 
 /// Environment for resolving names.
@@ -46,7 +60,7 @@ pub struct ImportEnv<'cx> {
     disk_cache: Option<Cache>,
     mem_cache: HashMap<ImportLocation, ImportResultId<'cx>>,
     stack: CyclesStack,
-    fetcher: Option<Box<dyn ImportFetcher>>,
+    fetcher: Box<dyn ImportFetcher>,
 }
 
 impl NameEnv {
@@ -94,30 +108,19 @@ impl NameEnv {
 }
 
 impl<'cx> ImportEnv<'cx> {
-    pub fn new(cx: Ctxt<'cx>) -> Self {
+    pub fn new(cx: Ctxt<'cx>, fetcher: Box<dyn ImportFetcher>) -> Self {
         ImportEnv {
             cx,
             #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
             disk_cache: Cache::new().ok(),
             mem_cache: Default::default(),
             stack: Default::default(),
-            fetcher: None,
+            fetcher,
         }
     }
 
-    pub fn with_fetcher(cx: Ctxt<'cx>, fetcher: Box<dyn ImportFetcher>) -> Self {
-        ImportEnv {
-            cx,
-            #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
-            disk_cache: Cache::new().ok(),
-            mem_cache: Default::default(),
-            stack: Default::default(),
-            fetcher: Some(fetcher),
-        }
-    }
-
-    pub fn fetcher(&self) -> Option<&dyn ImportFetcher> {
-        self.fetcher.as_deref()
+    pub fn fetcher(&self) -> &dyn ImportFetcher {
+        &*self.fetcher
     }
 
     pub fn cx(&self) -> Ctxt<'cx> {
