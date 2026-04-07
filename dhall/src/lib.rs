@@ -107,6 +107,27 @@ impl Parsed {
         resolve::resolve_with_fetcher(cx, self, fetcher)
     }
 
+    /// Resolve with extra names pre-populated in the environment.
+    /// Custom builtin names should be inserted into `names` so the
+    /// resulting `Hir` resolves them as variables instead of `MissingVar`.
+    pub fn resolve_with_names<'cx>(
+        self,
+        cx: Ctxt<'cx>,
+        names: &semantics::NameEnv,
+    ) -> Result<Resolved<'cx>, Error> {
+        resolve::resolve_with_names(cx, self, names)
+    }
+
+    /// Like `resolve_with_names`, but also uses a custom import fetcher.
+    pub fn resolve_with_names_and_fetcher<'cx>(
+        self,
+        cx: Ctxt<'cx>,
+        names: &semantics::NameEnv,
+        fetcher: Box<dyn semantics::ImportFetcher>,
+    ) -> Result<Resolved<'cx>, Error> {
+        resolve::resolve_with_names_and_fetcher(cx, self, names, fetcher)
+    }
+
     pub fn skip_resolve<'cx>(
         self,
         cx: Ctxt<'cx>,
@@ -165,6 +186,15 @@ impl<'cx> Resolved<'cx> {
     ) -> Result<Typed<'cx>, TypeError> {
         Ok(Typed::from_tir(typecheck_with(cx, &self.0, ty)?))
     }
+    /// Typecheck against a pre-populated type environment.
+    /// Use this when custom bindings (e.g. custom builtins) have been
+    /// injected during resolution via `resolve_with_names`.
+    pub fn typecheck_with_env(
+        &self,
+        ty_env: &semantics::TyEnv<'cx>,
+    ) -> Result<Typed<'cx>, TypeError> {
+        Ok(Typed::from_tir(semantics::type_with(ty_env, &self.0, None)?))
+    }
     /// Converts a value back to the corresponding AST expression.
     pub fn to_expr(&self, cx: Ctxt<'cx>) -> Expr {
         self.0.to_expr_noopts(cx)
@@ -181,6 +211,12 @@ impl<'cx> Typed<'cx> {
     /// Reduce an expression to its normal form, performing beta reduction
     pub fn normalize(&self, cx: Ctxt<'cx>) -> Normalized<'cx> {
         Normalized(self.hir.eval_closed_expr(cx))
+    }
+
+    /// Evaluate the expression in the given environment, returning the normalized value.
+    /// Use this when typechecking was done with a custom `TyEnv` (via `typecheck_with_env`).
+    pub fn eval_to_nir(&self, env: &semantics::NzEnv<'cx>) -> Nir<'cx> {
+        self.hir.eval(env)
     }
 
     /// Converts a value back to the corresponding AST expression.
