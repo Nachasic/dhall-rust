@@ -31,6 +31,9 @@ pub enum Span {
 }
 
 impl ParsedSpan {
+    pub fn new(input: Rc<str>, start: usize, end: usize) -> Self {
+        ParsedSpan { input, start, end }
+    }
     pub fn to_input(&self) -> String {
         self.input.to_string()
     }

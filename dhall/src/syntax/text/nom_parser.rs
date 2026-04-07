@@ -18,10 +18,12 @@
 //! 10. Top-level expressions (let, lambda, if, etc.)
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use alloc::borrow::ToOwned;
+use core::ops::{Range, RangeFrom, RangeFull, RangeTo};
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
@@ -39,21 +41,244 @@ use crate::syntax::{
     NaiveDouble, NumKind, Span, UnspannedExpr, V,
 };
 use crate::syntax::{Const, FilePath, FilePrefix, Hash, ImportMode, ImportTarget, Scheme, URL};
+use crate::syntax::ParsedSpan;
+
+// ── Custom input type ────────────────────────────────────────────────
+
+/// Nom input wrapper that carries a reference to the full source `Rc<str>`
+/// alongside the current `&str` slice, enabling span creation via pointer
+/// arithmetic.
+#[derive(Clone, Copy)]
+struct Input<'a> {
+    /// Current unconsumed slice (always a subslice of `*full`).
+    fragment: &'a str,
+    /// Shared reference to the `Rc<str>` that owns the full source text.
+    /// We store a raw pointer to avoid carrying the `Rc` by value (which
+    /// isn't `Copy`). Safety: the `Rc` is kept alive by `parse_expr`.
+    full: *const str,
+    /// The `Rc<str>` itself, stored once and cloned only when creating spans.
+    /// We keep a reference to it so we can clone cheaply.
+    source: &'a Rc<str>,
+}
+
+impl<'a> Input<'a> {
+    fn new(input: &'a str, source: &'a Rc<str>) -> Self {
+        Input { fragment: input, full: &**source as *const str, source }
+    }
+
+    /// Byte offset of the current fragment within the full source.
+    fn offset(&self) -> usize {
+        self.fragment.as_ptr() as usize - self.full as *const u8 as usize
+    }
+
+    /// Create a `Span::Parsed` covering bytes `[start_input .. self]`
+    /// i.e. from where `start_input` pointed to where `self` currently points.
+    fn span_since(&self, start: Input<'a>) -> Span {
+        Span::Parsed(ParsedSpan::new(
+            self.source.clone(),
+            start.offset(),
+            self.offset(),
+        ))
+    }
+
+    fn starts_with(&self, pat: &str) -> bool { self.fragment.starts_with(pat) }
+    fn starts_with_char(&self, c: char) -> bool { self.fragment.starts_with(c) }
+    fn is_empty(&self) -> bool { self.fragment.is_empty() }
+    fn len(&self) -> usize { self.fragment.len() }
+    fn as_str(&self) -> &'a str { self.fragment }
+}
+
+impl<'a> core::fmt::Debug for Input<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.fragment.fmt(f)
+    }
+}
+
+impl<'a> PartialEq for Input<'a> {
+    fn eq(&self, other: &Self) -> bool { self.fragment == other.fragment }
+}
+impl<'a> Eq for Input<'a> {}
+
+// ── nom trait implementations ────────────────────────────────────────
+// All delegate to the inner `&str`, reconstructing `Input` for returned slices.
+
+impl<'a> nom::InputLength for Input<'a> {
+    fn input_len(&self) -> usize { self.fragment.len() }
+}
+
+impl<'a> nom::Offset for Input<'a> {
+    fn offset(&self, second: &Self) -> usize {
+        second.fragment.as_ptr() as usize - self.fragment.as_ptr() as usize
+    }
+}
+
+impl<'a> nom::AsBytes for Input<'a> {
+    fn as_bytes(&self) -> &[u8] { self.fragment.as_bytes() }
+}
+
+impl<'a> nom::InputIter for Input<'a> {
+    type Item = char;
+    type Iter = core::str::CharIndices<'a>;
+    type IterElem = core::str::Chars<'a>;
+
+    fn iter_indices(&self) -> Self::Iter { self.fragment.char_indices() }
+    fn iter_elements(&self) -> Self::IterElem { self.fragment.chars() }
+    fn position<P>(&self, predicate: P) -> Option<usize>
+    where P: Fn(Self::Item) -> bool {
+        self.fragment.char_indices()
+            .find(|&(_, c)| predicate(c))
+            .map(|(i, _)| i)
+    }
+    fn slice_index(&self, count: usize) -> Result<usize, nom::Needed> {
+        let mut cnt = 0;
+        for (index, _) in self.fragment.char_indices() {
+            if cnt == count { return Ok(index); }
+            cnt += 1;
+        }
+        if cnt == count { return Ok(self.fragment.len()); }
+        Err(nom::Needed::Unknown)
+    }
+}
+
+impl<'a> nom::InputTake for Input<'a> {
+    fn take(&self, count: usize) -> Self {
+        Input { fragment: &self.fragment[..count], ..*self }
+    }
+    fn take_split(&self, count: usize) -> (Self, Self) {
+        let (prefix, suffix) = self.fragment.split_at(count);
+        (
+            Input { fragment: suffix, ..*self },
+            Input { fragment: prefix, ..*self },
+        )
+    }
+}
+
+impl<'a> nom::InputTakeAtPosition for Input<'a> {
+    type Item = char;
+
+    fn split_at_position<P, E: nom::error::ParseError<Self>>(
+        &self, predicate: P,
+    ) -> IResult<Self, Self, E>
+    where P: Fn(Self::Item) -> bool {
+        match self.fragment.find(predicate) {
+            Some(i) => Ok((
+                Input { fragment: &self.fragment[i..], ..*self },
+                Input { fragment: &self.fragment[..i], ..*self },
+            )),
+            None => Err(nom::Err::Incomplete(nom::Needed::new(1))),
+        }
+    }
+
+    fn split_at_position1<P, E: nom::error::ParseError<Self>>(
+        &self, predicate: P, e: nom::error::ErrorKind,
+    ) -> IResult<Self, Self, E>
+    where P: Fn(Self::Item) -> bool {
+        match self.fragment.find(predicate) {
+            Some(0) => Err(nom::Err::Error(E::from_error_kind(*self, e))),
+            Some(i) => Ok((
+                Input { fragment: &self.fragment[i..], ..*self },
+                Input { fragment: &self.fragment[..i], ..*self },
+            )),
+            None => Err(nom::Err::Incomplete(nom::Needed::new(1))),
+        }
+    }
+
+    fn split_at_position_complete<P, E: nom::error::ParseError<Self>>(
+        &self, predicate: P,
+    ) -> IResult<Self, Self, E>
+    where P: Fn(Self::Item) -> bool {
+        match self.fragment.find(predicate) {
+            Some(i) => Ok((
+                Input { fragment: &self.fragment[i..], ..*self },
+                Input { fragment: &self.fragment[..i], ..*self },
+            )),
+            None => Ok((
+                Input { fragment: &self.fragment[self.fragment.len()..], ..*self },
+                Input { fragment: self.fragment, ..*self },
+            )),
+        }
+    }
+
+    fn split_at_position1_complete<P, E: nom::error::ParseError<Self>>(
+        &self, predicate: P, e: nom::error::ErrorKind,
+    ) -> IResult<Self, Self, E>
+    where P: Fn(Self::Item) -> bool {
+        match self.fragment.find(predicate) {
+            Some(0) => Err(nom::Err::Error(E::from_error_kind(*self, e))),
+            Some(i) => Ok((
+                Input { fragment: &self.fragment[i..], ..*self },
+                Input { fragment: &self.fragment[..i], ..*self },
+            )),
+            None if self.fragment.is_empty() =>
+                Err(nom::Err::Error(E::from_error_kind(*self, e))),
+            None => Ok((
+                Input { fragment: &self.fragment[self.fragment.len()..], ..*self },
+                Input { fragment: self.fragment, ..*self },
+            )),
+        }
+    }
+}
+
+impl<'a, 'b> nom::Compare<&'b str> for Input<'a> {
+    fn compare(&self, t: &'b str) -> nom::CompareResult {
+        nom::Compare::compare(&self.fragment, t)
+    }
+    fn compare_no_case(&self, t: &'b str) -> nom::CompareResult {
+        nom::Compare::compare_no_case(&self.fragment, t)
+    }
+}
+
+impl<'a> nom::FindToken<char> for Input<'a> {
+    fn find_token(&self, token: char) -> bool {
+        self.fragment.chars().any(|c| c == token)
+    }
+}
+
+impl<'a, 'b> nom::FindSubstring<&'b str> for Input<'a> {
+    fn find_substring(&self, substr: &'b str) -> Option<usize> {
+        self.fragment.find(substr)
+    }
+}
+
+impl<'a, R: core::str::FromStr> nom::ParseTo<R> for Input<'a> {
+    fn parse_to(&self) -> Option<R> { self.fragment.parse().ok() }
+}
+
+macro_rules! impl_slice {
+    ($range:ty, $index:expr) => {
+        impl<'a> nom::Slice<$range> for Input<'a> {
+            fn slice(&self, range: $range) -> Self {
+                Input { fragment: &self.fragment[$index(range)], ..*self }
+            }
+        }
+    };
+}
+impl_slice!(Range<usize>,    |r: Range<usize>| r);
+impl_slice!(RangeTo<usize>,  |r: RangeTo<usize>| r);
+impl_slice!(RangeFrom<usize>,|r: RangeFrom<usize>| r);
+impl_slice!(RangeFull,       |r: RangeFull| r);
+
+#[cfg(feature = "alloc")]
+impl<'a> nom::ExtendInto for Input<'a> {
+    type Item = char;
+    type Extender = String;
+    fn new_builder(&self) -> String { String::new() }
+    fn extend_into(&self, acc: &mut String) { acc.push_str(self.fragment); }
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-type VerboseError<'a> = nom::error::VerboseError<&'a str>;
-type ParseResult<'a, T> = IResult<&'a str, T, VerboseError<'a>>;
+type InputVerboseError<'a> = nom::error::VerboseError<Input<'a>>;
+type ParseResult<'a, T> = IResult<Input<'a>, T, InputVerboseError<'a>>;
 
-/// Create a VerboseError at the given input position.
-fn make_err(input: &str, kind: nom::error::ErrorKind) -> nom::Err<VerboseError<'_>> {
+/// Create an error at the given input position.
+fn make_err(input: Input<'_>, kind: nom::error::ErrorKind) -> nom::Err<InputVerboseError<'_>> {
     nom::Err::Error(nom::error::VerboseError {
         errors: alloc::vec![(input, nom::error::VerboseErrorKind::Nom(kind))],
     })
 }
 
-/// Shorthand for a simple tag-like error.
-fn tag_err(input: &str) -> nom::Err<VerboseError<'_>> {
+fn tag_err(input: Input<'_>) -> nom::Err<InputVerboseError<'_>> {
     make_err(input, nom::error::ErrorKind::Tag)
 }
 
@@ -64,11 +289,22 @@ fn mkexpr(kind: UnspannedExpr) -> Expr {
     Expr::new(kind, Span::Artificial)
 }
 
+/// Create a spanned expression. `before` is the input at the start of the
+/// production, `after` is the input after it was consumed.
+fn spanned(before: Input<'_>, after: Input<'_>, kind: UnspannedExpr) -> Expr {
+    Expr::new(kind, after.span_since(before))
+}
+
+/// Like `spanned` but takes two existing expressions and unions their spans.
+fn spanned_union(a: &Expr, b: &Expr, kind: UnspannedExpr) -> Expr {
+    Expr::new(kind, a.span().union(&b.span()))
+}
+
 /// Parse a keyword, ensuring it's not a prefix of a longer identifier.
-fn keyword<'a>(kw: &'static str) -> impl FnMut(&'a str) -> ParseResult<'a, &'a str> {
-    move |input: &'a str| {
+fn keyword<'a>(kw: &'static str) -> impl FnMut(Input<'a>) -> ParseResult<'a, Input<'a>> {
+    move |input: Input<'a>| {
         let (rest, matched) = tag(kw)(input)?;
-        if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
+        if rest.fragment.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
             Err(tag_err(input))
         } else {
             Ok((rest, matched))
@@ -97,17 +333,17 @@ fn insert_recordlit_entry(map: &mut alloc::collections::BTreeMap<Label, Expr>, l
 
 /// Skip whitespace and line comments (-- to end of line)
 /// and block comments ({- ... -}, which can nest).
-fn ws(input: &str) -> ParseResult<'_, ()> {
+fn ws(input: Input<'_>) -> ParseResult<'_, ()> {
     let mut rest = input;
     loop {
-        let (r, _) = multispace0::<_, VerboseError<'_>>(rest)?;
+        let (r, _) = multispace0(rest)?;
         rest = r;
-        if rest.starts_with("--") {
-            rest = &rest[2..];
-            let (r, _) = take_while::<_, _, VerboseError<'_>>(|c: char| c != '\n')(rest)?;
+        if rest.fragment.starts_with("--") {
+            rest = Input { fragment: &rest.fragment[2..], ..rest };
+            let (r, _) = take_while(|c: char| c != '\n')(rest)?;
             rest = r;
-        } else if rest.starts_with("{-") {
-            rest = block_comment(&rest[2..])?;
+        } else if rest.fragment.starts_with("{-") {
+            rest = block_comment(Input { fragment: &rest.fragment[2..], ..rest })?;
         } else {
             break;
         }
@@ -117,18 +353,18 @@ fn ws(input: &str) -> ParseResult<'_, ()> {
 
 /// Consume the body of a block comment (after the opening `{-`).
 /// Handles nesting: each `{-` inside must be matched by a `-}`.
-fn block_comment(input: &str) -> Result<&str, nom::Err<VerboseError<'_>>> {
+fn block_comment<'a>(input: Input<'a>) -> Result<Input<'a>, nom::Err<InputVerboseError<'a>>> {
     let mut rest = input;
     loop {
-        match rest.find("{-").map(|i| (i, true)).into_iter()
-            .chain(rest.find("-}").map(|i| (i, false)))
+        match rest.fragment.find("{-").map(|i| (i, true)).into_iter()
+            .chain(rest.fragment.find("-}").map(|i| (i, false)))
             .min_by_key(|(i, _)| *i)
         {
             Some((i, true)) => {
-                rest = block_comment(&rest[i + 2..])?;
+                rest = block_comment(Input { fragment: &rest.fragment[i + 2..], ..rest })?;
             }
             Some((i, false)) => {
-                return Ok(&rest[i + 2..]);
+                return Ok(Input { fragment: &rest.fragment[i + 2..], ..rest });
             }
             None => {
                 return Err(tag_err(input));
@@ -138,7 +374,7 @@ fn block_comment(input: &str) -> Result<&str, nom::Err<VerboseError<'_>>> {
 }
 
 /// Mandatory whitespace (at least one space/tab/newline/comment).
-fn ws1(input: &str) -> ParseResult<'_, ()> {
+fn ws1(input: Input<'_>) -> ParseResult<'_, ()> {
     let start = input;
     let (rest, _) = ws(input)?;
     if rest.len() == start.len() {
@@ -150,37 +386,37 @@ fn ws1(input: &str) -> ParseResult<'_, ()> {
 
 // ── 2. Literals ──────────────────────────────────────────────────────
 
-fn natural_literal(input: &str) -> ParseResult<'_, u64> {
+fn natural_literal(input: Input<'_>) -> ParseResult<'_, u64> {
     alt((
         // Hex: 0x...
         map_res(
             preceded(tag("0x"), take_while1(|c: char| c.is_ascii_hexdigit())),
-            |s: &str| u64::from_str_radix(s, 16),
+            |s: Input<'_>| u64::from_str_radix(s.fragment, 16),
         ),
         // Decimal (reject leading zeros like 042)
         decimal_natural,
     ))(input)
 }
 
-fn decimal_natural(input: &str) -> ParseResult<'_, u64> {
+fn decimal_natural(input: Input<'_>) -> ParseResult<'_, u64> {
     let (rest, s) = digit1(input)?;
-    if s.len() > 1 && s.starts_with('0') {
+    if s.fragment.len() > 1 && s.fragment.starts_with('0') {
         Err(tag_err(input))
     } else {
-        s.parse::<u64>()
+        s.fragment.parse::<u64>()
             .map(|n| (rest, n))
             .map_err(|_| tag_err(input))
     }
 }
 
-fn integer_literal(input: &str) -> ParseResult<'_, i64> {
+fn integer_literal(input: Input<'_>) -> ParseResult<'_, i64> {
     let (rest, sign) = one_of("+-")(input)?;
     let (rest, n) = natural_literal(rest)?;
     let val = if sign == '-' { -(n as i64) } else { n as i64 };
     Ok((rest, val))
 }
 
-fn double_literal(input: &str) -> ParseResult<'_, NaiveDouble> {
+fn double_literal(input: Input<'_>) -> ParseResult<'_, NaiveDouble> {
     alt((
         value(NaiveDouble::from(f64::NAN), tag("NaN")),
         value(NaiveDouble::from(f64::INFINITY), tag("Infinity")),
@@ -194,7 +430,7 @@ fn double_literal(input: &str) -> ParseResult<'_, NaiveDouble> {
                 digit1,
                 opt(recognize(tuple((one_of("eE"), opt(one_of("+-")), digit1)))),
             ))),
-            |s: &str| s.parse::<f64>()
+            |s: Input<'_>| s.fragment.parse::<f64>()
                 .map_err(|e| format!("{}", e))
                 .and_then(|f| if f.is_infinite() { Err("out of range".to_owned()) } else { Ok(NaiveDouble::from(f)) }),
         ),
@@ -207,7 +443,7 @@ fn double_literal(input: &str) -> ParseResult<'_, NaiveDouble> {
                 opt(one_of("+-")),
                 digit1,
             ))),
-            |s: &str| s.parse::<f64>()
+            |s: Input<'_>| s.fragment.parse::<f64>()
                 .map_err(|e| format!("{}", e))
                 .and_then(|f| if f.is_infinite() { Err("out of range".to_owned()) } else { Ok(NaiveDouble::from(f)) }),
         ),
@@ -221,7 +457,7 @@ fn is_noncharacter(n: u32) -> bool {
 }
 
 /// Double-quoted string escape sequence.
-fn double_quote_escaped(input: &str) -> ParseResult<'_, String> {
+fn double_quote_escaped(input: Input<'_>) -> ParseResult<'_, String> {
     preceded(char('\\'), alt((
         value("\"".to_owned(), char('"')),
         value("$".to_owned(), char('$')),
@@ -237,7 +473,7 @@ fn double_quote_escaped(input: &str) -> ParseResult<'_, String> {
             // \u{XXXXX}
             map_res(
                 delimited(char('{'), take_while1(|c: char| c.is_ascii_hexdigit()), char('}')),
-                |s: &str| u32::from_str_radix(s, 16)
+                |s: Input<'_>| u32::from_str_radix(s.fragment, 16)
                     .map_err(|e| format!("{}", e))
                     .and_then(|n| if is_noncharacter(n) { Err("non-character".to_owned()) } else { Ok(n) })
                     .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
@@ -251,7 +487,7 @@ fn double_quote_escaped(input: &str) -> ParseResult<'_, String> {
                     one_of("0123456789abcdefABCDEF"),
                     one_of("0123456789abcdefABCDEF"),
                 ))),
-                |s: &str| u32::from_str_radix(s, 16)
+                |s: Input<'_>| u32::from_str_radix(s.fragment, 16)
                     .map_err(|e| format!("{}", e))
                     .and_then(|n| if is_noncharacter(n) { Err("non-character".to_owned()) } else { Ok(n) })
                     .and_then(|n| char::from_u32(n).ok_or_else(|| "invalid codepoint".to_owned()))
@@ -262,7 +498,7 @@ fn double_quote_escaped(input: &str) -> ParseResult<'_, String> {
 }
 
 /// A chunk of a double-quoted string: text, escape, or interpolation.
-fn double_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<Expr>> {
+fn double_quote_chunk(input: Input<'_>) -> ParseResult<'_, InterpolatedTextContents<Expr>> {
     alt((
         // Interpolation: ${expr}
         map(
@@ -274,7 +510,7 @@ fn double_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<E
         // Plain text (no ", \, or ${ )
         map(
             take_while1(|c: char| c != '"' && c != '\\' && c != '$'),
-            |s: &str| InterpolatedTextContents::Text(s.to_owned()),
+            |s: Input<'_>| InterpolatedTextContents::Text(s.fragment.to_owned()),
         ),
         // A lone $ that isn't followed by {
         map(char('$'), |_| InterpolatedTextContents::Text("$".to_owned())),
@@ -282,7 +518,7 @@ fn double_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<E
 }
 
 /// Double-quoted string literal with escapes and interpolation.
-fn double_quote_literal(input: &str) -> ParseResult<'_, InterpolatedText<Expr>> {
+fn double_quote_literal(input: Input<'_>) -> ParseResult<'_, InterpolatedText<Expr>> {
     delimited(
         char('"'),
         map(many0(double_quote_chunk), |chunks| chunks.into_iter().collect()),
@@ -291,7 +527,7 @@ fn double_quote_literal(input: &str) -> ParseResult<'_, InterpolatedText<Expr>> 
 }
 
 /// A chunk of a single-quoted (multi-line) string.
-fn single_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<Expr>> {
+fn single_quote_chunk(input: Input<'_>) -> ParseResult<'_, InterpolatedTextContents<Expr>> {
     alt((
         // Escaped sequences specific to multi-line strings
         value(InterpolatedTextContents::Text("''".to_owned()), tag("'''")),
@@ -304,7 +540,7 @@ fn single_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<E
         // Plain text: anything that isn't '' or ${
         map(
             take_while1(|c: char| c != '\'' && c != '$'),
-            |s: &str| InterpolatedTextContents::Text(s.to_owned()),
+            |s: Input<'_>| InterpolatedTextContents::Text(s.fragment.to_owned()),
         ),
         // A lone ' that isn't followed by another '
         map(
@@ -320,7 +556,7 @@ fn single_quote_chunk(input: &str) -> ParseResult<'_, InterpolatedTextContents<E
 }
 
 /// Multi-line (single-quoted) string literal with indent stripping.
-fn single_quote_literal(input: &str) -> ParseResult<'_, InterpolatedText<Expr>> {
+fn single_quote_literal(input: Input<'_>) -> ParseResult<'_, InterpolatedText<Expr>> {
     let (rest, _) = tag("''")(input)?;
     // Must be followed by newline (the opening '' must be on its own line-end)
     let (rest, _) = alt((tag("\r\n"), tag("\n")))(rest)?;
@@ -409,21 +645,21 @@ fn is_label_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'
 }
 
-fn simple_label(input: &str) -> ParseResult<'_, Label> {
+fn simple_label(input: Input<'_>) -> ParseResult<'_, Label> {
     let (rest, name) = recognize(pair(
         take_while1(is_label_start),
         take_while(is_label_char),
     ))(input)?;
 
-    if RESERVED.contains(&name) {
+    if RESERVED.contains(&name.fragment) {
         return Err(tag_err(input));
     }
 
-    Ok((rest, Label::from(name)))
+    Ok((rest, Label::from(name.fragment)))
 }
 
 /// A nonreserved-label: rejects both keywords AND builtins (unless backtick-quoted).
-fn nonreserved_label(input: &str) -> ParseResult<'_, Label> {
+fn nonreserved_label(input: Input<'_>) -> ParseResult<'_, Label> {
     if let Ok(r) = backtick_label(input) {
         return Ok(r);
     }
@@ -434,27 +670,27 @@ fn nonreserved_label(input: &str) -> ParseResult<'_, Label> {
     Ok((rest, l))
 }
 
-fn backtick_label(input: &str) -> ParseResult<'_, Label> {
+fn backtick_label(input: Input<'_>) -> ParseResult<'_, Label> {
     delimited(
         char('`'),
-        map(take_while(|c: char| c != '`'), Label::from),
+        map(take_while(|c: char| c != '`'), |s: Input<'_>| Label::from(s.fragment)),
         char('`'),
     )(input)
 }
 
-fn label(input: &str) -> ParseResult<'_, Label> {
+fn label(input: Input<'_>) -> ParseResult<'_, Label> {
     alt((backtick_label, simple_label))(input)
 }
 
 /// any-label-or-some: allows all labels plus the keyword `Some`.
-fn any_label_or_some(input: &str) -> ParseResult<'_, Label> {
+fn any_label_or_some(input: Input<'_>) -> ParseResult<'_, Label> {
     alt((
         label,
         map(keyword("Some"), |_| Label::from("Some")),
     ))(input)
 }
 
-fn variable(input: &str) -> ParseResult<'_, V> {
+fn variable(input: Input<'_>) -> ParseResult<'_, V> {
     let (rest, l) = nonreserved_label(input)?;
     let (rest, idx) = opt(preceded(
         delimited(ws, char('@'), ws),
@@ -465,19 +701,19 @@ fn variable(input: &str) -> ParseResult<'_, V> {
 
 // ── 4. Builtins ──────────────────────────────────────────────────────
 
-fn builtin(input: &str) -> ParseResult<'_, UnspannedExpr> {
+fn builtin(input: Input<'_>) -> ParseResult<'_, UnspannedExpr> {
     let (rest, name) = recognize(pair(
         take_while1(is_label_start),
         take_while(is_label_char),
     ))(input)?;
 
-    let expr = match name {
+    let expr = match name.fragment {
         "True" => ExprKind::Num(NumKind::Bool(true)),
         "False" => ExprKind::Num(NumKind::Bool(false)),
         "Type" => ExprKind::Const(Const::Type),
         "Kind" => ExprKind::Const(Const::Kind),
         "Sort" => ExprKind::Const(Const::Sort),
-        _ => match crate::builtins::Builtin::parse(name) {
+        _ => match crate::builtins::Builtin::parse(name.fragment) {
             Some(b) => ExprKind::Builtin(b),
             None => return Err(tag_err(input)),
         },
@@ -485,9 +721,9 @@ fn builtin(input: &str) -> ParseResult<'_, UnspannedExpr> {
     Ok((rest, expr))
 }
 
-fn builtin_no_index(input: &str) -> ParseResult<'_, Expr> {
+fn builtin_no_index(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, b) = builtin(input)?;
-    if rest.starts_with('@') {
+    if rest.starts_with_char('@') {
         Err(tag_err(input))
     } else {
         Ok((rest, mkexpr(b)))
@@ -498,7 +734,7 @@ fn builtin_no_index(input: &str) -> ParseResult<'_, Expr> {
 
 /// Path component: /segment or /"quoted segment"
 /// A single path component without leading /
-fn path_component_body(input: &str) -> ParseResult<'_, String> {
+fn path_component_body(input: Input<'_>) -> ParseResult<'_, String> {
     alt((
         delimited(
             char('"'),
@@ -510,31 +746,31 @@ fn path_component_body(input: &str) -> ParseResult<'_, String> {
                         || (0x30..=0x7F).contains(&n)
                         || n > 0x7F
                 }),
-                |s: &str| s.to_owned(),
+                |s: Input<'_>| s.fragment.to_owned(),
             ),
             char('"'),
         ),
         map(
             take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@".contains(c)),
-            |s: &str| s.to_owned(),
+            |s: Input<'_>| s.fragment.to_owned(),
         ),
     ))(input)
 }
 
-fn path_component(input: &str) -> ParseResult<'_, String> {
+fn path_component(input: Input<'_>) -> ParseResult<'_, String> {
     preceded(char('/'), path_component_body)(input)
 }
 
-fn absolute_path_prefix(input: &str) -> ParseResult<'_, FilePrefix> {
+fn absolute_path_prefix(input: Input<'_>) -> ParseResult<'_, FilePrefix> {
     let (rest, _) = char('/')(input)?;
-    if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with(' ') {
+    if rest.is_empty() || rest.starts_with_char('\\') || rest.starts_with_char('/') || rest.starts_with_char(' ') {
         Err(tag_err(input))
     } else {
         Ok((rest, FilePrefix::Absolute))
     }
 }
 
-fn local_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
+fn local_import(input: Input<'_>) -> ParseResult<'_, ImportTarget<Expr>> {
     let (rest, prefix) = alt((
         value(FilePrefix::Parent, tag("../")),
         value(FilePrefix::Here, tag("./")),
@@ -554,7 +790,7 @@ fn local_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
 }
 
 /// HTTP(S) import: https://example.com/foo/bar.dhall [using headers]
-fn http_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
+fn http_import(input: Input<'_>) -> ParseResult<'_, ImportTarget<Expr>> {
     let (rest, scheme) = alt((
         value(Scheme::HTTPS, tag("https://")),
         value(Scheme::HTTP, tag("http://")),
@@ -563,7 +799,7 @@ fn http_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
     // Authority: everything up to the first /
     let (rest, authority) = map(
         take_while1(|c: char| c != '/' && c != '?' && c != '#' && !c.is_whitespace()),
-        |s: &str| s.to_owned(),
+        |s: Input<'_>| s.fragment.to_owned(),
     )(rest)?;
 
     // Path segments (URL paths allow percent-encoding)
@@ -571,7 +807,7 @@ fn http_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
         char('/'),
         map(
             take_while(|c: char| c.is_ascii_alphanumeric() || "-._~!$&'*+;=:@%".contains(c)),
-            |s: &str| s.to_owned(),
+            |s: Input<'_>| s.fragment.to_owned(),
         ),
     ))(rest)?;
     let file_path = if segments.is_empty() { vec!["".to_owned()] } else { segments };
@@ -579,7 +815,7 @@ fn http_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
     // Optional query
     let (rest, query) = opt(preceded(
         char('?'),
-        map(take_while(|c: char| c != ' ' && c != '\n' && c != '\r'), |s: &str| s.to_owned()),
+        map(take_while(|c: char| c != ' ' && c != '\n' && c != '\r'), |s: Input<'_>| s.fragment.to_owned()),
     ))(rest)?;
 
     // Optional headers: using import-expression
@@ -601,19 +837,19 @@ fn http_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
 }
 
 /// Environment variable import: env:NAME or env:"NAME"
-fn env_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
+fn env_import(input: Input<'_>) -> ParseResult<'_, ImportTarget<Expr>> {
     let (rest, _) = tag("env:")(input)?;
     let (rest, name) = alt((
         // Quoted: env:"NAME" (POSIX env var with escapes)
         delimited(char('"'), posix_env_var, char('"')),
         // Unquoted: env:NAME (bash-style)
-        map(take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_'), |s: &str| s.to_owned()),
+        map(take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_'), |s: Input<'_>| s.fragment.to_owned()),
     ))(rest)?;
     Ok((rest, ImportTarget::Env(name)))
 }
 
 /// Parse a POSIX-compliant quoted environment variable name.
-fn posix_env_var(input: &str) -> ParseResult<'_, String> {
+fn posix_env_var(input: Input<'_>) -> ParseResult<'_, String> {
     let (rest, chars) = many0(alt((
         // Escape sequences
         preceded(char('\\'), alt((
@@ -643,24 +879,24 @@ fn posix_env_var(input: &str) -> ParseResult<'_, String> {
 }
 
 /// `missing` keyword — only needs to not be a prefix of an identifier
-fn missing_import(input: &str) -> ParseResult<'_, ImportTarget<Expr>> {
+fn missing_import(input: Input<'_>) -> ParseResult<'_, ImportTarget<Expr>> {
     let (rest, _) = tag("missing")(input)?;
-    if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
+    if rest.fragment.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/') {
         return Err(tag_err(input));
     }
     Ok((rest, ImportTarget::Missing))
 }
 
 /// SHA256 hash: sha256:hex...
-fn import_hash(input: &str) -> ParseResult<'_, Hash> {
+fn import_hash(input: Input<'_>) -> ParseResult<'_, Hash> {
     let (rest, _) = tag("sha256:")(input)?;
     let (rest, hex_str) = take_while1(|c: char| c.is_ascii_hexdigit())(rest)?;
-    let bytes = hex::decode(hex_str).map_err(|_| tag_err(input))?;
+    let bytes = hex::decode(hex_str.fragment).map_err(|_| tag_err(input))?;
     Ok((rest, Hash::SHA256(bytes.into())))
 }
 
 /// Full import expression: location hash? (as Text | as Location)?
-fn import_expr(input: &str) -> ParseResult<'_, Expr> {
+fn import_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, location) = alt((
         http_import,
         local_import,
@@ -691,7 +927,7 @@ fn import_expr(input: &str) -> ParseResult<'_, Expr> {
 
 // ── 6. Atoms (primitive expressions) ─────────────────────────────────
 
-fn atom(input: &str) -> ParseResult<'_, Expr> {
+fn atom(input: Input<'_>) -> ParseResult<'_, Expr> {
     context("expression", alt((
         // Parenthesized expression
         delimited(
@@ -723,15 +959,15 @@ fn atom(input: &str) -> ParseResult<'_, Expr> {
 
 // ── 7. Records ───────────────────────────────────────────────────────
 
-fn record_literal_or_type(input: &str) -> ParseResult<'_, Expr> {
+fn record_literal_or_type(input: Input<'_>) -> ParseResult<'_, Expr> {
     use alloc::collections::BTreeMap;
     delimited(
         terminated(char('{'), ws),
         |input| {
             let (rest, _) = opt(terminated(char(','), ws))(input)?;
             // Try empty record literal: = [,]
-            if rest.starts_with('=') {
-                let rest2 = &rest[1..];
+            if rest.starts_with_char('=') {
+                let rest2 = Input { fragment: &rest.fragment[1..], ..rest };
                 let (rest2, _) = opt(preceded(ws, char(',')))(rest2)?;
                 return Ok((rest2, mkexpr(ExprKind::RecordLit(Default::default()))));
             }
@@ -774,12 +1010,12 @@ fn record_literal_or_type(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Record entry: `name = expr`, `name : type`, `name` (pun), or `name.a.b = expr` (dotted).
-fn record_entry(input: &str) -> ParseResult<'_, (Label, char, Expr)> {
+fn record_entry(input: Input<'_>) -> ParseResult<'_, (Label, char, Expr)> {
     let (rest, first_label) = terminated(any_label_or_some, ws)(input)?;
 
     // Try dotted field syntax: name.a.b = expr
-    if rest.starts_with('.') {
-        let rest2 = &rest[1..];
+    if rest.starts_with_char('.') {
+        let rest2 = Input { fragment: &rest.fragment[1..], ..rest };
         let (rest2, _) = ws(rest2)?;
         // Collect remaining dot-separated labels
         let (rest2, more_labels) = separated_list0(
@@ -799,14 +1035,14 @@ fn record_entry(input: &str) -> ParseResult<'_, (Label, char, Expr)> {
     }
 
     // Try `name = expr` or `name : type`
-    if rest.starts_with('=') {
-        let rest2 = &rest[1..];
+    if rest.starts_with_char('=') {
+        let rest2 = Input { fragment: &rest.fragment[1..], ..rest };
         let (rest2, _) = ws(rest2)?;
         let (rest2, val) = expression(rest2)?;
         return Ok((rest2, (first_label, '=', val)));
     }
-    if rest.starts_with(':') {
-        let rest2 = &rest[1..];
+    if rest.starts_with_char(':') {
+        let rest2 = Input { fragment: &rest.fragment[1..], ..rest };
         let (rest2, _) = ws1(rest2)?;
         let (rest2, val) = expression(rest2)?;
         return Ok((rest2, (first_label, ':', val)));
@@ -819,7 +1055,7 @@ fn record_entry(input: &str) -> ParseResult<'_, (Label, char, Expr)> {
 
 // ── 8. Lists ─────────────────────────────────────────────────────────
 
-fn list_literal(input: &str) -> ParseResult<'_, Expr> {
+fn list_literal(input: Input<'_>) -> ParseResult<'_, Expr> {
     delimited(
         terminated(char('['), ws),
         map(
@@ -848,7 +1084,7 @@ fn list_literal(input: &str) -> ParseResult<'_, Expr> {
 // ── 8b. Union types ──────────────────────────────────────────────────
 
 /// Parse a single union type entry: `label` or `label : type`.
-fn union_type_entry(input: &str) -> ParseResult<'_, (Label, Option<Expr>)> {
+fn union_type_entry(input: Input<'_>) -> ParseResult<'_, (Label, Option<Expr>)> {
     let (rest, l) = terminated(any_label_or_some, ws)(input)?;
     let (rest, ty) = opt(|input| {
         let (r, _) = char(':')(input)?;
@@ -859,7 +1095,7 @@ fn union_type_entry(input: &str) -> ParseResult<'_, (Label, Option<Expr>)> {
     Ok((rest, (l, ty)))
 }
 
-fn union_type(input: &str) -> ParseResult<'_, Expr> {
+fn union_type(input: Input<'_>) -> ParseResult<'_, Expr> {
     use alloc::collections::BTreeMap;
     let (rest, _) = terminated(char('<'), ws)(input)?;
     let (rest, _) = opt(terminated(char('|'), ws))(rest)?;
@@ -889,7 +1125,7 @@ fn union_type(input: &str) -> ParseResult<'_, Expr> {
 
 // ── 8c. Empty list with type ─────────────────────────────────────────
 
-fn empty_list_literal(input: &str) -> ParseResult<'_, Expr> {
+fn empty_list_literal(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = terminated(char('['), ws)(input)?;
     let (rest, _) = opt(terminated(char(','), ws))(rest)?;
     let (rest, _) = terminated(char(']'), ws)(rest)?;
@@ -902,7 +1138,7 @@ fn empty_list_literal(input: &str) -> ParseResult<'_, Expr> {
 // ── 9. Selector, completion, application ─────────────────────────────
 
 /// Field access and projection: `e.x`, `e.{ x, y }`, `e.(T)`
-fn selector_expression(input: &str) -> ParseResult<'_, Expr> {
+fn selector_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     use alloc::collections::BTreeSet;
     let (mut rest, mut expr) = atom(input)?;
     loop {
@@ -967,7 +1203,7 @@ fn selector_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Completion: `T::r`
-fn completion_expression(input: &str) -> ParseResult<'_, Expr> {
+fn completion_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut expr) = selector_expression(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
@@ -986,7 +1222,7 @@ fn completion_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Keyword-prefixed application: `Some e`, `merge x y`, `toMap x`
-fn first_application(input: &str) -> ParseResult<'_, Expr> {
+fn first_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     alt((
         // Some e (mandatory whitespace after Some)
         some_application,
@@ -998,14 +1234,14 @@ fn first_application(input: &str) -> ParseResult<'_, Expr> {
     ))(input)
 }
 
-fn some_application(input: &str) -> ParseResult<'_, Expr> {
+fn some_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("Some")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, e) = import_expression(rest)?;
     Ok((rest, mkexpr(ExprKind::SomeLit(e))))
 }
 
-fn merge_application(input: &str) -> ParseResult<'_, Expr> {
+fn merge_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("merge")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
@@ -1014,7 +1250,7 @@ fn merge_application(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, mkexpr(ExprKind::Op(OpKind::Merge(x, y, None)))))
 }
 
-fn tomap_application(input: &str) -> ParseResult<'_, Expr> {
+fn tomap_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("toMap")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
@@ -1022,13 +1258,13 @@ fn tomap_application(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// import-expression = import / completion-expression
-fn import_expression(input: &str) -> ParseResult<'_, Expr> {
+fn import_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     alt((import_expr, completion_expression))(input)
 }
 
 /// Function application: `f a b` = `App(App(f, a), b)`
 /// ABNF: first-application-expression *(whsp1 import-expression)
-fn application(input: &str) -> ParseResult<'_, Expr> {
+fn application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut expr) = first_application(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
@@ -1057,7 +1293,7 @@ fn application(input: &str) -> ParseResult<'_, Expr> {
 macro_rules! binop_level {
     // Single operator — no alt() needed
     ($name:ident, $next:ident, $op_tag:expr => $op_variant:expr) => {
-        fn $name(input: &str) -> ParseResult<'_, Expr> {
+        fn $name(input: Input<'_>) -> ParseResult<'_, Expr> {
             let (mut rest, mut lhs) = $next(input)?;
             loop {
                 let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
@@ -1080,7 +1316,7 @@ macro_rules! binop_level {
     };
     // Multiple operators — use alt()
     ($name:ident, $next:ident, $( $op_tag:expr => $op_variant:expr ),+ $(,)?) => {
-        fn $name(input: &str) -> ParseResult<'_, Expr> {
+        fn $name(input: Input<'_>) -> ParseResult<'_, Expr> {
             let (mut rest, mut lhs) = $next(input)?;
             loop {
                 let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
@@ -1106,9 +1342,9 @@ macro_rules! binop_level {
 }
 
 /// Match `==` but not `===`.
-fn op_bool_eq(input: &str) -> ParseResult<'_, BinOp> {
+fn op_bool_eq(input: Input<'_>) -> ParseResult<'_, BinOp> {
     let (rest, _) = tag("==")(input)?;
-    if rest.starts_with('=') {
+    if rest.starts_with_char('=') {
         Err(tag_err(input))
     } else {
         Ok((rest, BoolEQ))
@@ -1120,7 +1356,7 @@ binop_level!(equiv_expr,                   import_alt_expr,    "===" => Equivale
 
 /// `?` requires mandatory whitespace after to disambiguate `http://a/a?a`
 /// ABNF: or-expression *(whsp "?" whsp1 or-expression)
-fn import_alt_expr(input: &str) -> ParseResult<'_, Expr> {
+fn import_alt_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = or_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
@@ -1147,14 +1383,14 @@ binop_level!(list_append_expr,             and_expr,           "#" => ListAppend
 
 /// `+` requires mandatory whitespace after to disambiguate `f +2`
 /// ABNF: text-append-expression *(whsp "+" whsp1 text-append-expression)
-fn plus_expr(input: &str) -> ParseResult<'_, Expr> {
+fn plus_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = list_append_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
             let (r, _) = ws(rest)?;
             let (r, _) = char('+')(r)?;
             // Reject ++ (that's text append)
-            if r.starts_with('+') {
+            if r.starts_with_char('+') {
                 return Err(tag_err(rest));
             }
             let (r, _) = ws1(r)?;
@@ -1178,7 +1414,7 @@ binop_level!(ne_expr,                      application,        "!=" => BoolNE);
 // combine, prefer, combine_types need hand-written parsers because
 // /\ vs // vs //\\ are ambiguous prefixes.
 
-fn combine_expr(input: &str) -> ParseResult<'_, Expr> {
+fn combine_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = prefer_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
@@ -1200,21 +1436,21 @@ fn combine_expr(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Match `//` but not `//\\`
-fn op_prefer_ascii(input: &str) -> ParseResult<'_, &str> {
+fn op_prefer_ascii(input: Input<'_>) -> ParseResult<'_, ()> {
     let (rest, _) = tag("//")(input)?;
-    if rest.starts_with('\\') {
+    if rest.starts_with_char('\\') {
         Err(tag_err(input))
     } else {
-        Ok((rest, "//"))
+        Ok((rest, ()))
     }
 }
 
-fn prefer_expr(input: &str) -> ParseResult<'_, Expr> {
+fn prefer_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = combine_types_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
             let (r, _) = ws(rest)?;
-            let (r, _) = alt((tag("⫽"), op_prefer_ascii))(r)?;
+            let (r, _) = alt((value((), tag("⫽")), op_prefer_ascii))(r)?;
             let (r, _) = ws(r)?;
             let (r, rhs) = combine_types_expr(r)?;
             Ok((r, rhs))
@@ -1230,7 +1466,7 @@ fn prefer_expr(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, lhs))
 }
 
-fn combine_types_expr(input: &str) -> ParseResult<'_, Expr> {
+fn combine_types_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = times_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<Expr> {
@@ -1252,7 +1488,7 @@ fn combine_types_expr(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// `==` level needs special handling to not consume `===`.
-fn bool_eq_expr(input: &str) -> ParseResult<'_, Expr> {
+fn bool_eq_expr(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (mut rest, mut lhs) = ne_expr(input)?;
     loop {
         let tried = (|| -> ParseResult<(crate::operations::BinOp, Expr)> {
@@ -1273,13 +1509,13 @@ fn bool_eq_expr(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, lhs))
 }
 
-fn operator_expression(input: &str) -> ParseResult<'_, Expr> {
+fn operator_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     equiv_expr(input)
 }
 
 // ── 11. Top-level expressions ────────────────────────────────────────
 
-fn let_expression(input: &str) -> ParseResult<'_, Expr> {
+fn let_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("let")(input)?;
     let (mut rest, _) = ws1(rest)?;
     let mut bindings = Vec::new();
@@ -1314,7 +1550,7 @@ fn let_expression(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, expr))
 }
 
-fn lambda_expression(input: &str) -> ParseResult<'_, Expr> {
+fn lambda_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("\\"), tag("λ")))(input)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char('(')(rest)?;
@@ -1332,7 +1568,7 @@ fn lambda_expression(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, mkexpr(ExprKind::Lam(name, ty, body))))
 }
 
-fn if_expression(input: &str) -> ParseResult<'_, Expr> {
+fn if_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("if")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, cond) = expression(rest)?;
@@ -1347,7 +1583,7 @@ fn if_expression(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, mkexpr(ExprKind::Op(OpKind::BoolIf(cond, t, f)))))
 }
 
-fn forall_expression(input: &str) -> ParseResult<'_, Expr> {
+fn forall_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("forall"), tag("∀")))(input)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char('(')(rest)?;
@@ -1365,7 +1601,7 @@ fn forall_expression(input: &str) -> ParseResult<'_, Expr> {
     Ok((rest, mkexpr(ExprKind::Pi(name, ty, body))))
 }
 
-fn assert_expression(input: &str) -> ParseResult<'_, Expr> {
+fn assert_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("assert")(input)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char(':')(rest)?;
@@ -1375,7 +1611,7 @@ fn assert_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// `merge x y : T` (with type annotation)
-fn merge_annot_expression(input: &str) -> ParseResult<'_, Expr> {
+fn merge_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("merge")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
@@ -1389,7 +1625,7 @@ fn merge_annot_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// `toMap x : T` (with type annotation)
-fn tomap_annot_expression(input: &str) -> ParseResult<'_, Expr> {
+fn tomap_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("toMap")(input)?;
     let (rest, _) = ws1(rest)?;
     let (rest, x) = import_expression(rest)?;
@@ -1402,7 +1638,7 @@ fn tomap_annot_expression(input: &str) -> ParseResult<'_, Expr> {
 
 /// `with` expression: `e with a.b.c = v`
 /// ABNF: import-expression 1*(whsp1 with whsp1 with-clause)
-fn with_expression(input: &str) -> ParseResult<'_, Expr> {
+fn with_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, base) = import_expression(input)?;
     let (mut rest, mut expr) = with_clause(rest, base)?;
     loop {
@@ -1415,7 +1651,7 @@ fn with_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Parse a single `with` clause: `whsp1 "with" whsp1 path = value`.
-fn with_clause(input: &str, base: Expr) -> ParseResult<'_, Expr> {
+fn with_clause(input: Input<'_>, base: Expr) -> ParseResult<'_, Expr> {
     let (rest, _) = ws1(input)?;
     let (rest, _) = keyword("with")(rest)?;
     let (rest, _) = ws1(rest)?;
@@ -1436,7 +1672,7 @@ fn with_clause(input: &str, base: Expr) -> ParseResult<'_, Expr> {
 /// Arrow type: `A -> B` (non-dependent function type)
 /// ABNF: operator-expression whsp arrow whsp expression
 /// Falls through to annotated-expression if no arrow found.
-fn arrow_or_annot_expression(input: &str) -> ParseResult<'_, Expr> {
+fn arrow_or_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, lhs) = operator_expression(input)?;
     // Try arrow
     let tried_arrow = (|| -> ParseResult<Expr> {
@@ -1464,7 +1700,7 @@ fn arrow_or_annot_expression(input: &str) -> ParseResult<'_, Expr> {
 }
 
 /// Top-level expression parser.
-pub fn expression(input: &str) -> ParseResult<'_, Expr> {
+pub fn expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     preceded(ws, alt((
         lambda_expression,
         let_expression,
@@ -1486,9 +1722,11 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
     while input.starts_with("#!") {
         input = input.find('\n').map_or("", |i| &input[i + 1..]);
     }
+    let source: Rc<str> = Rc::from(input);
+    let inp = Input::new(input, &source);
     let mut complete = terminated(expression, ws);
-    match complete(input) {
-        Ok(("", expr)) => Ok(expr),
+    match complete(inp) {
+        Ok((rest, expr)) if rest.is_empty() => Ok(expr),
         Ok((rest, _)) => {
             let consumed = input.len() - rest.len();
             let before = &input[..consumed];
@@ -1509,7 +1747,7 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
 
 /// Format a VerboseError into a human-readable message with line/column info,
 /// source context, and a caret pointing at the error position.
-fn format_verbose_error(input: &str, err: &nom::error::VerboseError<&str>) -> String {
+fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) -> String {
     use nom::error::VerboseErrorKind;
 
     // Find the deepest (most specific) error position
@@ -1519,7 +1757,7 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<&str>) -> St
         .or_else(|| err.errors.last())
         .unwrap_or(&err.errors[0]);
 
-    let offset = input.len() - err_input.len();
+    let offset = input.len() - err_input.fragment.len();
     let prefix = &input[..offset];
     let line = prefix.chars().filter(|&c| c == '\n').count() + 1;
     let last_nl = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
