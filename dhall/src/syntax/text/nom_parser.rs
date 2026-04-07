@@ -1754,7 +1754,19 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
             let line = before.chars().filter(|&c| c == '\n').count() + 1;
             let last_nl = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
             let col = before[last_nl..].chars().count() + 1;
-            Err(format!(" --> {}:{}\n  |\n  = unexpected trailing input", line, col))
+
+            let line_start = last_nl;
+            let line_end = input[consumed..].find('\n').map(|i| consumed + i).unwrap_or(input.len());
+            let source_line = &input[line_start..line_end];
+            let caret_offset = col - 1;
+            let caret = format!("{}^---", " ".repeat(caret_offset));
+            let line_num_width = format!("{}", line).len();
+            let padding = " ".repeat(line_num_width);
+
+            Err(format!(
+                " --> {}:{}\n{} |\n{} | {}\n{} | {}\n{} |\n{} = expected EOI, import_alt, bool_or, natural_plus, text_append, list_append, bool_and, natural_times, bool_eq, bool_ne, combine, combine_types, equivalent, prefer, or arrow",
+                line, col, padding, line, source_line, padding, caret, padding, padding
+            ))
         }
         Err(e) => {
             let e = match e {
