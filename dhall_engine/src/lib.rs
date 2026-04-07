@@ -9,6 +9,7 @@ extern crate alloc;
 
 pub mod conv;
 pub mod fetcher;
+pub mod parse;
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -22,7 +23,7 @@ use dhall::syntax::{ExprKind, Label};
 use dhall::{Ctxt, Parsed};
 
 pub use dhall::semantics::NoImports;
-pub use fetcher::DefaultFetcher;
+pub use fetcher::{DefaultFetcher, FallbackFetcher};
 
 /// Re-export core dhall types needed by engine users.
 pub mod types {
@@ -33,7 +34,7 @@ pub mod types {
     pub use dhall::syntax::{Expr, ExprKind, ImportMode, Label, NumKind, Span};
     pub use dhall::{Ctxt, Normalized, Parsed, Resolved, Typed};
     pub use crate::conv::{DhallType, FromNir, IntoNir, NirExt, NirRecord, NirRecordBuilder};
-    pub use crate::fetcher::DefaultFetcher;
+    pub use crate::fetcher::{DefaultFetcher, FallbackFetcher};
     pub use crate::Lazy;
 }
 
@@ -115,7 +116,10 @@ impl Engine {
 
     fn make_fetcher(&self) -> Box<dyn ImportFetcher> {
         match &self.fetcher {
-            Some(f) => Box::new(ArcFetcher(Arc::clone(f))),
+            Some(f) => Box::new(FallbackFetcher {
+                primary: ArcFetcher(Arc::clone(f)),
+                fallback: DefaultFetcher,
+            }),
             None => Box::new(DefaultFetcher),
         }
     }

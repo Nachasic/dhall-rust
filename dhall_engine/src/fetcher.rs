@@ -21,6 +21,27 @@ use url::Url;
 /// The standard Dhall import fetcher: resolves local files, env vars, and HTTP imports.
 pub struct DefaultFetcher;
 
+/// A fetcher that tries `primary` first, falling back to `fallback` on error.
+pub struct FallbackFetcher<A, B> {
+    pub primary: A,
+    pub fallback: B,
+}
+
+impl<A: ImportFetcher, B: ImportFetcher> ImportFetcher for FallbackFetcher<A, B> {
+    fn chain(
+        &self,
+        base: &ImportLocation,
+        import: &Import,
+    ) -> Result<ImportLocation, Error> {
+        self.primary.chain(base, import)
+            .or_else(|_| self.fallback.chain(base, import))
+    }
+    fn fetch(&self, location: &ImportLocation) -> Result<String, Error> {
+        self.primary.fetch(location)
+            .or_else(|_| self.fallback.fetch(location))
+    }
+}
+
 impl ImportFetcher for DefaultFetcher {
     fn chain(
         &self,
@@ -147,7 +168,7 @@ fn chain_local(
 }
 
 #[cfg(feature = "std")]
-fn resolve_home(path: impl AsRef<std::path::Path>) -> Result<PathBuf, Error> {
+pub(crate) fn resolve_home(path: impl AsRef<std::path::Path>) -> Result<PathBuf, Error> {
     let mut f = PathBuf::new();
     match path.as_ref().strip_prefix("~") {
         Ok(rest) => {
@@ -189,11 +210,11 @@ fn fetch_text(_kind: &ImportLocationKind) -> Result<String, Error> {
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "std", feature = "reqwest"))]
-fn download_http_text(url: Url) -> Result<String, Error> {
+pub(crate) fn download_http_text(url: Url) -> Result<String, Error> {
     Ok(reqwest::blocking::get(url).unwrap().text().unwrap())
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "std", not(feature = "reqwest")))]
-fn download_http_text(_url: Url) -> Result<String, Error> {
+pub(crate) fn download_http_text(_url: Url) -> Result<String, Error> {
     panic!("Remote imports are disabled in this build of dhall-rust")
 }
