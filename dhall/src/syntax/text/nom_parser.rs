@@ -326,11 +326,15 @@ fn insert_recordlit_entry(map: &mut alloc::collections::BTreeMap<Label, Expr>, l
         Entry::Vacant(entry) => { entry.insert(e); }
         Entry::Occupied(mut entry) => {
             let other = entry.insert(Expr::new(ExprKind::Num(NumKind::Bool(false)), Span::Artificial));
+            let span = Span::DuplicateRecordFieldsSugar(
+                Box::new(other.span()),
+                Box::new(e.span()),
+            );
             entry.insert(Expr::new(
                 ExprKind::Op(OpKind::BinOp(
                     BinOp::RecursiveRecordMerge, other, e,
                 )),
-                Span::Artificial,
+                span,
             ));
         }
     }
@@ -1183,7 +1187,9 @@ fn selector_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
                     let mut set = BTreeSet::new();
                     for l in ls {
                         if !set.insert(l) {
-                            return Err(make_err(r, nom::error::ErrorKind::Verify));
+                            return Err(nom::Err::Failure(nom::error::VerboseError {
+                                errors: alloc::vec![(input, nom::error::VerboseErrorKind::Context("Duplicate field in projection"))],
+                            }));
                         }
                     }
                     let sp = expr.span().union(&rest.span_since(input));
@@ -1210,6 +1216,7 @@ fn selector_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
         })();
         match tried {
             Ok((r, e)) => { expr = e; rest = r; }
+            Err(nom::Err::Failure(e)) => return Err(nom::Err::Failure(e)),
             Err(_) => break,
         }
     }
