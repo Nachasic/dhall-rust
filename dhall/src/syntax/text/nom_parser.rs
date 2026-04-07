@@ -85,11 +85,9 @@ impl<'a> Input<'a> {
         ))
     }
 
-    fn starts_with(&self, pat: &str) -> bool { self.fragment.starts_with(pat) }
     fn starts_with_char(&self, c: char) -> bool { self.fragment.starts_with(c) }
     fn is_empty(&self) -> bool { self.fragment.is_empty() }
     fn len(&self) -> usize { self.fragment.len() }
-    fn as_str(&self) -> &'a str { self.fragment }
 }
 
 impl<'a> core::fmt::Debug for Input<'a> {
@@ -262,7 +260,6 @@ impl_slice!(RangeTo<usize>,  |r: RangeTo<usize>| r);
 impl_slice!(RangeFrom<usize>,|r: RangeFrom<usize>| r);
 impl_slice!(RangeFull,       |r: RangeFull| r);
 
-#[cfg(feature = "alloc")]
 impl<'a> nom::ExtendInto for Input<'a> {
     type Item = char;
     type Extender = String;
@@ -288,10 +285,6 @@ fn tag_err(input: Input<'_>) -> nom::Err<InputVerboseError<'_>> {
 
 /// Error type for the public API.
 pub type ParseError = String;
-
-fn mkexpr(kind: UnspannedExpr) -> Expr {
-    Expr::new(kind, Span::Artificial)
-}
 
 /// Create a spanned expression. `before` is the input at the start of the
 /// production, `after` is the input after it was consumed.
@@ -1128,7 +1121,9 @@ fn union_type(input: Input<'_>) -> ParseResult<'_, Expr> {
     let mut map = BTreeMap::new();
     for (l, ty) in entries {
         if map.contains_key(&l) {
-            return Err(make_err(input, nom::error::ErrorKind::Verify));
+            return Err(nom::Err::Failure(nom::error::VerboseError {
+                errors: alloc::vec![(input, nom::error::VerboseErrorKind::Context("Duplicate variant in union type"))],
+            }));
         }
         map.insert(l, ty);
     }
@@ -1717,7 +1712,7 @@ fn arrow_or_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
 }
 
 /// Top-level expression parser.
-pub fn expression(input: Input<'_>) -> ParseResult<'_, Expr> {
+fn expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     preceded(ws, alt((
         lambda_expression,
         let_expression,
@@ -1767,11 +1762,12 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
 fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) -> String {
     use nom::error::VerboseErrorKind;
 
-    // Find the deepest (most specific) error position
+    // Find the deepest (most specific) error position — prefer the context
+    // that consumed the most input (i.e. smallest remaining fragment).
     let (err_input, kind) = err.errors.iter()
-        .rev()
-        .find(|(_, k)| matches!(k, VerboseErrorKind::Context(_)))
-        .or_else(|| err.errors.last())
+        .filter(|(_, k)| matches!(k, VerboseErrorKind::Context(_)))
+        .min_by_key(|(i, _)| i.fragment.len())
+        .or_else(|| err.errors.iter().min_by_key(|(i, _)| i.fragment.len()))
         .unwrap_or(&err.errors[0]);
 
     let offset = input.len() - err_input.fragment.len();
@@ -1789,13 +1785,14 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
     let caret_offset = col - 1;
     let caret = format!("{}^---", " ".repeat(caret_offset));
 
-    // Build the "expected" message from context labels
-    let contexts: Vec<&str> = err.errors.iter()
-        .filter_map(|(_, k)| match k {
-            VerboseErrorKind::Context(ctx) => Some(*ctx),
+    // Use the most specific context label (the one that consumed the most input)
+    let best_context = err.errors.iter()
+        .filter_map(|(i, k)| match k {
+            VerboseErrorKind::Context(ctx) => Some((i.fragment.len(), *ctx)),
             _ => None,
         })
-        .collect();
+        .min_by_key(|(len, _)| *len)
+        .map(|(_, ctx)| ctx);
 
     let line_num_width = format!("{}", line).len();
     let padding = " ".repeat(line_num_width);
@@ -1805,10 +1802,12 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
         line, col, padding, line, source_line, padding, caret, padding
     );
 
-    if !contexts.is_empty() {
-        let mut unique = contexts.clone();
-        unique.dedup();
-        msg.push_str(&format!("\n{} = expected {}", padding, unique.join(", ")));
+    if let Some(ctx) = best_context {
+        if ctx.starts_with(|c: char| c.is_uppercase()) {
+            msg.push_str(&format!("\n{} = {}", padding, ctx));
+        } else {
+            msg.push_str(&format!("\n{} = expected {}", padding, ctx));
+        }
     } else {
         // Fall back to the nom error kind
         let hint = match kind {

@@ -3,4 +3,4 @@
 1 | <x | x>
   | ^---
   |
-  = expected expression
+  = Duplicate variant in union type
