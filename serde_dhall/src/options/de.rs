@@ -338,7 +338,7 @@ impl<'a, A> Deserializer<'a, A> {
                 });
 
             let resolved = if self.allow_imports {
-                parsed_with_builtins.resolve(cx)?
+                parsed_with_builtins.resolve_with_fetcher(cx, Box::new(dhall_engine::DefaultFetcher))?
             } else {
                 parsed_with_builtins.skip_resolve(cx)?
             };
