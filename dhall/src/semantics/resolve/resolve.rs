@@ -642,17 +642,27 @@ fn resolve_with_env<'cx>(
     env: &mut ImportEnv<'cx>,
     parsed: Parsed,
 ) -> Result<Resolved<'cx>, Error> {
+    resolve_with_env_and_names(env, parsed, &NameEnv::new())
+}
+
+/// Like `resolve_with_env`, but starts with extra names already in scope.
+/// This allows the caller to inject custom bindings (e.g. custom builtins)
+/// so that the resulting `Hir` resolves them as variables instead of `MissingVar`.
+pub fn resolve_with_env_and_names<'cx>(
+    env: &mut ImportEnv<'cx>,
+    parsed: Parsed,
+    extra_names: &NameEnv,
+) -> Result<Resolved<'cx>, Error> {
     let Parsed(expr, base_location) = parsed;
     let mut nodes = Vec::new();
-    // First we collect all imports.
+    let mut name_env = extra_names.clone();
     let resolved = traverse_accumulate(
         env,
-        &mut NameEnv::new(),
+        &mut name_env,
         &mut nodes,
         &base_location,
         &expr,
     );
-    // Then we resolve them and choose sides for the alternatives.
     resolve_nodes(env, &nodes)?;
     Ok(Resolved(resolved))
 }
@@ -673,6 +683,25 @@ pub fn resolve_with_fetcher<'cx>(
     fetcher: Box<dyn ImportFetcher>,
 ) -> Result<Resolved<'cx>, Error> {
     parsed.resolve_with_env(&mut ImportEnv::with_fetcher(cx, fetcher))
+}
+
+/// Like `resolve`, but with extra names pre-populated in the environment.
+pub fn resolve_with_names<'cx>(
+    cx: Ctxt<'cx>,
+    parsed: Parsed,
+    names: &NameEnv,
+) -> Result<Resolved<'cx>, Error> {
+    resolve_with_env_and_names(&mut ImportEnv::new(cx), parsed, names)
+}
+
+/// Like `resolve_with_names`, but also uses a custom fetcher.
+pub fn resolve_with_names_and_fetcher<'cx>(
+    cx: Ctxt<'cx>,
+    parsed: Parsed,
+    names: &NameEnv,
+    fetcher: Box<dyn ImportFetcher>,
+) -> Result<Resolved<'cx>, Error> {
+    resolve_with_env_and_names(&mut ImportEnv::with_fetcher(cx, fetcher), parsed, names)
 }
 
 /// Resolves names, and errors if we find any imports.
