@@ -7,9 +7,16 @@ license = "BSD-2-Clause"
 repository = "https://github.com/Nadrieril/dhall-rust"
 
 [features]
-default = ["std"]
+default = ["std", "reqwest"]
 std = ["dhall/std"]
+reqwest = ["dep:reqwest"]
 
 [dependencies]
 dhall = { path = "../dhall", default-features = false }
 hashbrown = "0.14"
+itertools = { version = "0.10.3", default-features = false, features = ["use_alloc"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.11", features = ["blocking"], optional = true }
+home = "0.5.3"
+url = "2.1"

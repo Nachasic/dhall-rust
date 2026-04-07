@@ -11,22 +11,22 @@ impl ImportFetcher for InMemoryFetcher {
         &self,
         _base: &ImportLocation,
         import: &dhall::semantics::Import,
-    ) -> Option<Result<ImportLocation, dhall::error::Error>> {
+    ) -> Result<ImportLocation, dhall::error::Error> {
         match &import.location {
             dhall::syntax::ImportTarget::Local(_prefix, file_path) => {
                 let path: LocalPath = file_path.file_path.join("/").into();
-                Some(Ok(ImportLocation::local(path, import.mode)))
+                Ok(ImportLocation::local(path, import.mode))
             }
-            _ => None,
+            _ => Err(dhall::error::ImportError::Missing.into()),
         }
     }
 
-    fn fetch(&self, location: &ImportLocation) -> Option<Result<String, dhall::error::Error>> {
+    fn fetch(&self, location: &ImportLocation) -> Result<String, dhall::error::Error> {
         match location.kind() {
             ImportLocationKind::Local(path) => {
-                self.0.get(path).map(|s| Ok(s.clone()))
+                self.0.get(path).cloned().ok_or_else(|| dhall::error::ImportError::Missing.into())
             }
-            _ => None,
+            _ => Err(dhall::error::ImportError::Missing.into()),
         }
     }
 }

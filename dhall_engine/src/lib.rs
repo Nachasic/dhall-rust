@@ -8,6 +8,7 @@
 extern crate alloc;
 
 pub mod conv;
+pub mod fetcher;
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -20,15 +21,19 @@ use dhall::semantics::{Hir, HirKind, ImportFetcher, Nir, NirKind, NzEnv, TyEnv, 
 use dhall::syntax::{ExprKind, Label};
 use dhall::{Ctxt, Parsed};
 
+pub use dhall::semantics::NoImports;
+pub use fetcher::DefaultFetcher;
+
 /// Re-export core dhall types needed by engine users.
 pub mod types {
     pub use dhall::builtins::Builtin;
     pub use dhall::ctxt::CustomBuiltinHandler;
     pub use dhall::operations::OpKind;
-    pub use dhall::semantics::{Hir, HirKind, ImportFetcher, ImportLocation, ImportLocationKind, LocalPath, Nir, NirKind, TextLit};
+    pub use dhall::semantics::{Hir, HirKind, ImportFetcher, ImportLocation, ImportLocationKind, LocalPath, Nir, NirKind, NoImports, TextLit};
     pub use dhall::syntax::{Expr, ExprKind, ImportMode, Label, NumKind, Span};
     pub use dhall::{Ctxt, Normalized, Parsed, Resolved, Typed};
     pub use crate::conv::{DhallType, FromNir, IntoNir, NirExt, NirRecord, NirRecordBuilder};
+    pub use crate::fetcher::DefaultFetcher;
     pub use crate::Lazy;
 }
 
@@ -44,20 +49,13 @@ impl Engine {
         Engine { fetcher: None, builtins: Vec::new() }
     }
 
-    /// Set a custom import fetcher. Receives the full `ImportLocation`
-    /// for each import — return `Some(Ok(source))` to provide content,
-    /// `Some(Err(...))` to fail, or `None` to fall back to default I/O.
+    /// Set a custom import fetcher.
     pub fn with_fetcher(mut self, fetcher: impl ImportFetcher + 'static) -> Self {
         self.fetcher = Some(Arc::new(fetcher));
         self
     }
 
     /// Register a custom builtin with a Dhall type signature.
-    ///
-    /// The `type_sig` must be a valid Dhall type expression, e.g.:
-    /// - `"Natural -> Natural"`
-    /// - `"{ name : Text, src : Text } -> { hash : Text, name : Text }"`
-    /// - `"forall (a : Type) -> List a -> Natural"`
     pub fn with_builtin(
         mut self,
         name: &str,
@@ -115,16 +113,20 @@ impl Engine {
         Ok(ty_env)
     }
 
+    fn make_fetcher(&self) -> Box<dyn ImportFetcher> {
+        match &self.fetcher {
+            Some(f) => Box::new(ArcFetcher(Arc::clone(f))),
+            None => Box::new(DefaultFetcher),
+        }
+    }
+
     fn resolve_with_names<'cx>(
         &self,
         cx: Ctxt<'cx>,
         p: Parsed,
         names: &dhall::semantics::NameEnv,
     ) -> Result<dhall::Resolved<'cx>, dhall::error::Error> {
-        match &self.fetcher {
-            Some(f) => p.resolve_with_names_and_fetcher(cx, names, Box::new(ArcFetcher(Arc::clone(f)))),
-            None => p.resolve_with_names(cx, names),
-        }
+        p.resolve_with_names_and_fetcher(cx, names, self.make_fetcher())
     }
 }
 
@@ -194,17 +196,6 @@ impl<'cx> Lazy<'cx> {
 impl Engine {
     /// Parse, resolve, and typecheck the input, then hand a [`Lazy`] handle
     /// to the callback. Nothing is normalized until you explicitly ask for it.
-    ///
-    /// The `Lazy` handle is scoped to the callback because the evaluation
-    /// context (`Ctxt`) cannot outlive it.
-    ///
-    /// ```ignore
-    /// engine.eval_lazy("{ a = 1, b = doubleNat 21 }", |lazy| {
-    ///     let names = lazy.field_names().unwrap();
-    ///     let a = lazy.field("a").unwrap().to_expr();
-    ///     // `doubleNat` is never called unless we touch field "b"
-    /// });
-    /// ```
     pub fn eval_lazy<T>(
         &self,
         input: &str,
@@ -236,19 +227,10 @@ impl Engine {
 struct ArcFetcher(Arc<dyn for<'cx> ImportFetcher>);
 
 impl ImportFetcher for ArcFetcher {
-    fn chain(&self, base: &dhall::semantics::ImportLocation, import: &dhall::semantics::Import) -> Option<Result<dhall::semantics::ImportLocation, dhall::error::Error>> {
+    fn chain(&self, base: &dhall::semantics::ImportLocation, import: &dhall::semantics::Import) -> Result<dhall::semantics::ImportLocation, dhall::error::Error> {
         self.0.chain(base, import)
     }
-    fn fetch(&self, location: &dhall::semantics::ImportLocation) -> Option<Result<String, dhall::error::Error>> {
+    fn fetch(&self, location: &dhall::semantics::ImportLocation) -> Result<String, dhall::error::Error> {
         self.0.fetch(location)
-    }
-}
-
-/// A fetcher that rejects all imports. Useful for sandboxed evaluation.
-pub struct NoImports;
-
-impl ImportFetcher for NoImports {
-    fn fetch(&self, _location: &dhall::semantics::ImportLocation) -> Option<Result<String, dhall::error::Error>> {
-        Some(Err(dhall::error::Error::from(dhall::error::ImportError::Missing)))
     }
 }
