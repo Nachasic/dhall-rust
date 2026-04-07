@@ -327,8 +327,8 @@ impl<'a, A> Deserializer<'a, A> {
         Ctxt::with_new(|cx| {
             let parsed = match &self.source {
                 Source::Str(s) => Parsed::parse_str(s)?,
-                Source::File(p) => Parsed::parse_file(p.as_ref())?,
-                Source::BinaryFile(p) => Parsed::parse_binary_file(p.as_ref())?,
+                Source::File(p) => dhall_engine::parse::parse_file(p.as_ref())?,
+                Source::BinaryFile(p) => dhall_engine::parse::parse_binary_file(p.as_ref())?,
                 Source::Binary(b) => Parsed::parse_binary(b)?,
             };
 
