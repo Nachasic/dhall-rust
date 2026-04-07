@@ -3,4 +3,4 @@
 1 | []
   | ^---
   |
-  = expected expression
+  = empty list requires a type annotation: `[] : List T`

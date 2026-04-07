@@ -3,4 +3,4 @@
 1 | f Some x
   |   ^---
   |
-  = expected EOI, import_alt, bool_or, natural_plus, text_append, list_append, bool_and, natural_times, bool_eq, bool_ne, combine, combine_types, equivalent, prefer, or arrow
+  = `Some` is a keyword and cannot be used as a function argument; try parenthesizing it

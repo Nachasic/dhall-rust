@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:5
   |
 1 | [] :T
-  | ^---
+  |     ^---
   |
-  = expected expression
+  = expected whitespace after `:` in empty list type

@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:5
   |
 1 | Some(x)
-  | ^---
+  |     ^---
   |
-  = expected expression
+  = expected whitespace after `Some`

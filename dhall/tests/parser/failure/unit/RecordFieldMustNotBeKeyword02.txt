@@ -3,4 +3,4 @@
 1 | { else: Text }
   | ^---
   |
-  = expected expression
+  = `else` is a reserved keyword and cannot be used as a record field name; use backticks: `\`else\``

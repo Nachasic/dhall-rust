@@ -3,4 +3,4 @@
 1 | { using: Text }
   | ^---
   |
-  = expected expression
+  = `using` is a reserved keyword and cannot be used as a record field name; use backticks: `\`using\``

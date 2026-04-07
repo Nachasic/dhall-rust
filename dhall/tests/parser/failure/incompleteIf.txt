@@ -1,6 +1,6 @@
- --> 10:1
+ --> 11:1
    |
-10 | if a then b else
+11 | 
    | ^---
    |
-   = expected expression
+   = expected expression after `else`

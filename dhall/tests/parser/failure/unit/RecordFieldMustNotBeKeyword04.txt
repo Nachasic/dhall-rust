@@ -3,4 +3,4 @@
 1 | { in: Text }
   | ^---
   |
-  = expected expression
+  = `in` is a reserved keyword and cannot be used as a record field name; use backticks: `\`in\``

@@ -3,4 +3,4 @@
 1 | < || >
   | ^---
   |
-  = expected expression
+  = unexpected `|` in union type

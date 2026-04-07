@@ -28,7 +28,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, multispace0, one_of},
-    combinator::{map, map_res, opt, recognize, value},
+    combinator::{cut, map, map_res, opt, recognize, value},
     error::context,
     multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded, terminated, tuple},
@@ -570,7 +570,7 @@ fn single_quote_chunk(input: Input<'_>) -> ParseResult<'_, InterpolatedTextConte
 fn single_quote_literal(input: Input<'_>) -> ParseResult<'_, InterpolatedText<Expr>> {
     let (rest, _) = tag("''")(input)?;
     // Must be followed by newline (the opening '' must be on its own line-end)
-    let (rest, _) = alt((tag("\r\n"), tag("\n")))(rest)?;
+    let (rest, _) = cut(context("newline after opening `''` (multi-line strings require a newline after `''`)", alt((tag("\r\n"), tag("\n")))))(rest)?;
     let (rest, chunks) = many0(single_quote_chunk)(rest)?;
     let (rest, _) = tag("''")(rest)?;
 
@@ -901,8 +901,24 @@ fn missing_import(input: Input<'_>) -> ParseResult<'_, ImportTarget<Expr>> {
 /// SHA256 hash: sha256:hex...
 fn import_hash(input: Input<'_>) -> ParseResult<'_, Hash> {
     let (rest, _) = tag("sha256:")(input)?;
-    let (rest, hex_str) = take_while1(|c: char| c.is_ascii_hexdigit())(rest)?;
-    let bytes = hex::decode(hex_str.fragment).map_err(|_| tag_err(input))?;
+    // After sha256:, commit — this is unambiguously a hash attempt
+    let (rest, hex_str) = cut(context(
+        "64 hex digits after `sha256:` (integrity hash contains non-hex characters)",
+        take_while1(|c: char| c.is_ascii_hexdigit()),
+    ))(rest)?;
+    // Reject if followed by more alphanumeric chars (truncated match)
+    if rest.fragment.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(nom::Err::Failure(nom::error::VerboseError {
+            errors: alloc::vec![(rest, nom::error::VerboseErrorKind::Context(
+                "Integrity hash contains non-hex characters"
+            ))],
+        }));
+    }
+    let bytes = hex::decode(hex_str.fragment).map_err(|_| nom::Err::Failure(nom::error::VerboseError {
+        errors: alloc::vec![(input, nom::error::VerboseErrorKind::Context(
+            "Integrity hash must be exactly 64 hex digits"
+        ))],
+    }))?;
     Ok((rest, Hash::SHA256(bytes.into())))
 }
 
@@ -1144,8 +1160,8 @@ fn empty_list_literal(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = opt(terminated(char(','), ws))(rest)?;
     let (rest, _) = terminated(char(']'), ws)(rest)?;
     let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, ty) = application(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in empty list type", ws1))(rest)?;
+    let (rest, ty) = cut(context("type annotation for empty list (e.g. `[] : List T`)", application))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::EmptyListLit(ty))))
 }
 
@@ -1179,7 +1195,9 @@ fn selector_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
                         ls.append(&mut more);
                         (r2, ls)
                     } else if has_leading.is_some() {
-                        return Err(tag_err(r));
+                        return Err(nom::Err::Failure(nom::error::VerboseError {
+                            errors: alloc::vec![(r, nom::error::VerboseErrorKind::Context("field name in projection (duplicate commas are not allowed)"))],
+                        }));
                     } else {
                         (r, vec![])
                     };
@@ -1257,24 +1275,24 @@ fn first_application(input: Input<'_>) -> ParseResult<'_, Expr> {
 
 fn some_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("Some")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, e) = import_expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `Some`", ws1))(rest)?;
+    let (rest, e) = cut(context("argument to `Some`", import_expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::SomeLit(e))))
 }
 
 fn merge_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("merge")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, x) = import_expression(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, y) = import_expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `merge`", ws1))(rest)?;
+    let (rest, x) = cut(context("first argument to `merge`", import_expression))(rest)?;
+    let (rest, _) = cut(context("whitespace between `merge` arguments", ws1))(rest)?;
+    let (rest, y) = cut(context("second argument to `merge`", import_expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::Merge(x, y, None)))))
 }
 
 fn tomap_application(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("toMap")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, x) = import_expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `toMap`", ws1))(rest)?;
+    let (rest, x) = cut(context("argument to `toMap`", import_expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::ToMap(x, None)))))
 }
 
@@ -1538,33 +1556,33 @@ fn operator_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
 
 fn let_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("let")(input)?;
-    let (mut rest, _) = ws1(rest)?;
+    let (mut rest, _) = cut(context("whitespace after `let`", ws1))(rest)?;
     let mut bindings = Vec::new();
     loop {
-        let (r, name) = terminated(nonreserved_label, ws)(rest)?;
+        let (r, name) = terminated(cut(context("variable name in `let` binding", nonreserved_label)), ws)(rest)?;
         let (r, annot) = opt(|input| {
             let (r, _) = char(':')(input)?;
-            let (r, _) = ws1(r)?;
-            let (r, e) = expression(r)?;
+            let (r, _) = cut(context("whitespace after `:` in `let` type annotation", ws1))(r)?;
+            let (r, e) = cut(context("type expression in `let` annotation", expression))(r)?;
             let (r, _) = ws(r)?;
             Ok((r, e))
         })(r)?;
-        let (r, _) = char('=')(r)?;
+        let (r, _) = cut(context("`=` in `let` binding", char('=')))(r)?;
         let (r, _) = ws(r)?;
-        let (r, val) = expression(r)?;
+        let (r, val) = cut(context("expression after `=` in `let` binding", expression))(r)?;
         let (r, _) = ws(r)?;
         bindings.push((name, annot, val));
         rest = r;
         if let Ok((r, _)) = keyword::<'_>("let")(rest) {
-            let (r, _) = ws1(r)?;
+            let (r, _) = cut(context("whitespace after `let`", ws1))(r)?;
             rest = r;
         } else {
             break;
         }
     }
-    let (rest, _) = keyword("in")(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, body) = expression(rest)?;
+    let (rest, _) = cut(context("`in` keyword after `let` binding", keyword("in")))(rest)?;
+    let (rest, _) = cut(context("whitespace after `in`", ws1))(rest)?;
+    let (rest, body) = cut(context("body expression after `in`", expression))(rest)?;
     let expr = bindings.into_iter().rev().fold(body, |acc, (name, annot, val)| {
         spanned(input, rest, ExprKind::Let(name, annot, val, acc))
     });
@@ -1573,87 +1591,87 @@ fn let_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
 
 fn lambda_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("\\"), tag("λ")))(input)?;
+    let (rest, _) = cut(context("whitespace before `(` in lambda", ws))(rest)?;
+    let (rest, _) = cut(context("`(` after `\\` or `λ`", char('(')))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = char('(')(rest)?;
+    let (rest, name) = cut(context("parameter name in lambda", terminated(nonreserved_label, ws)))(rest)?;
+    let (rest, _) = cut(context("`:` after parameter name", char(':')))(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in lambda", ws1))(rest)?;
+    let (rest, ty) = cut(context("type annotation in lambda", expression))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, name) = terminated(nonreserved_label, ws)(rest)?;
-    let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, ty) = expression(rest)?;
+    let (rest, _) = cut(context("`)` in lambda", char(')')))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = char(')')(rest)?;
+    let (rest, _) = cut(context("`->` or `→` after lambda parameters", alt((tag("->"), tag("→")))))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = alt((tag("->"), tag("→")))(rest)?;
-    let (rest, _) = ws(rest)?;
-    let (rest, body) = expression(rest)?;
+    let (rest, body) = cut(context("body expression in lambda", expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Lam(name, ty, body))))
 }
 
 fn if_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("if")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, cond) = expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `if`", ws1))(rest)?;
+    let (rest, cond) = cut(context("condition after `if`", expression))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = keyword("then")(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, t) = expression(rest)?;
+    let (rest, _) = cut(context("`then` keyword", keyword("then")))(rest)?;
+    let (rest, _) = cut(context("whitespace after `then`", ws1))(rest)?;
+    let (rest, t) = cut(context("expression after `then`", expression))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = keyword("else")(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, f) = expression(rest)?;
+    let (rest, _) = cut(context("`else` keyword", keyword("else")))(rest)?;
+    let (rest, _) = cut(context("whitespace after `else`", ws1))(rest)?;
+    let (rest, f) = cut(context("expression after `else`", expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::BoolIf(cond, t, f)))))
 }
 
 fn forall_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = alt((tag("forall"), tag("∀")))(input)?;
+    let (rest, _) = cut(context("whitespace before `(` in `forall`", ws))(rest)?;
+    let (rest, _) = cut(context("`(` after `forall`", char('(')))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = char('(')(rest)?;
+    let (rest, name) = cut(context("variable name in `forall`", terminated(nonreserved_label, ws)))(rest)?;
+    let (rest, _) = cut(context("`:` in `forall`", char(':')))(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in `forall`", ws1))(rest)?;
+    let (rest, ty) = cut(context("type in `forall`", expression))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, name) = terminated(nonreserved_label, ws)(rest)?;
-    let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, ty) = expression(rest)?;
+    let (rest, _) = cut(context("`)` in `forall`", char(')')))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = char(')')(rest)?;
+    let (rest, _) = cut(context("`->` or `→` after `forall`", alt((tag("->"), tag("→")))))(rest)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = alt((tag("->"), tag("→")))(rest)?;
-    let (rest, _) = ws(rest)?;
-    let (rest, body) = expression(rest)?;
+    let (rest, body) = cut(context("body expression in `forall`", expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Pi(name, ty, body))))
 }
 
 fn assert_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("assert")(input)?;
     let (rest, _) = ws(rest)?;
-    let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, e) = expression(rest)?;
+    let (rest, _) = cut(context("`:` after `assert`", char(':')))(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in `assert`", ws1))(rest)?;
+    let (rest, e) = cut(context("expression after `assert :`", expression))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Assert(e))))
 }
 
 /// `merge x y : T` (with type annotation)
 fn merge_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("merge")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, x) = import_expression(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, y) = import_expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `merge`", ws1))(rest)?;
+    let (rest, x) = cut(context("first argument to `merge`", import_expression))(rest)?;
+    let (rest, _) = cut(context("whitespace between `merge` arguments", ws1))(rest)?;
+    let (rest, y) = cut(context("second argument to `merge`", import_expression))(rest)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, ty) = application(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in `merge`", ws1))(rest)?;
+    let (rest, ty) = cut(context("type annotation in `merge`", application))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::Merge(x, y, Some(ty))))))
 }
 
 /// `toMap x : T` (with type annotation)
 fn tomap_annot_expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     let (rest, _) = keyword("toMap")(input)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, x) = import_expression(rest)?;
+    let (rest, _) = cut(context("whitespace after `toMap`", ws1))(rest)?;
+    let (rest, x) = cut(context("argument to `toMap`", import_expression))(rest)?;
     let (rest, _) = ws(rest)?;
     let (rest, _) = char(':')(rest)?;
-    let (rest, _) = ws1(rest)?;
-    let (rest, ty) = application(rest)?;
+    let (rest, _) = cut(context("whitespace after `:` in `toMap`", ws1))(rest)?;
+    let (rest, ty) = cut(context("type annotation in `toMap`", application))(rest)?;
     Ok((rest, spanned(input, rest, ExprKind::Op(OpKind::ToMap(x, Some(ty))))))
 }
 
@@ -1763,9 +1781,13 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
             let line_num_width = format!("{}", line).len();
             let padding = " ".repeat(line_num_width);
 
+            let remaining = rest.fragment;
+            let had_leading_ws = consumed > 0 && input.as_bytes()[consumed - 1].is_ascii_whitespace();
+            let hint = diagnose_leftover(remaining, had_leading_ws, before);
+
             Err(format!(
-                " --> {}:{}\n{} |\n{} | {}\n{} | {}\n{} |\n{} = expected EOI, import_alt, bool_or, natural_plus, text_append, list_append, bool_and, natural_times, bool_eq, bool_ne, combine, combine_types, equivalent, prefer, or arrow",
-                line, col, padding, line, source_line, padding, caret, padding, padding
+                " --> {}:{}\n{} |\n{} | {}\n{} | {}\n{} |\n{} = {}",
+                line, col, padding, line, source_line, padding, caret, padding, padding, hint
             ))
         }
         Err(e) => {
@@ -1778,6 +1800,35 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
     }
 }
 
+/// Produce a human-readable hint for leftover input after a successfully parsed expression.
+fn diagnose_leftover(remaining: &str, _had_leading_ws: bool, before: &str) -> String {
+    let trimmed = remaining.trim_start();
+    if trimmed.starts_with('(') && !remaining.starts_with(|c: char| c.is_whitespace()) {
+        "function application requires a space before `(` (e.g. `f (x)` not `f(x)`)".into()
+    } else if trimmed.starts_with(':') && !trimmed.starts_with("::") {
+        if before.ends_with(" sha256") || before.ends_with("\tsha256") || before.ends_with("\nsha256") || before == "sha256" {
+            "`sha256:` integrity hash must be attached to an import, not a parenthesized expression; move it inside the parentheses".into()
+        } else {
+            let after_colon = &trimmed[1..];
+            if after_colon.starts_with(|c: char| c.is_whitespace()) || after_colon.is_empty() {
+                "unexpected `:` — type annotations are not allowed at this position; try parenthesizing the expression".into()
+            } else {
+                "type annotation requires whitespace after `:` (e.g. `x : T` not `x :T`)".into()
+            }
+        }
+    } else if trimmed.starts_with("with") && trimmed[4..].starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
+        "`with` cannot be used at this precedence level; try parenthesizing the left-hand side".into()
+    } else if trimmed.starts_with('+') && !trimmed.starts_with("++") {
+        "the `+` operator requires whitespace on both sides (e.g. `x + y`)".into()
+    } else if trimmed.starts_with("Some") && trimmed[4..].starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
+        "`Some` is a keyword and cannot be used as a function argument; try parenthesizing it".into()
+    } else if trimmed.starts_with(".{") && trimmed.contains(':') {
+        "projection by type requires parentheses: use `r.(T)` instead of `r.{ x: T }`".into()
+    } else {
+        "unexpected input; expected operator, end of input, or whitespace-separated expression".into()
+    }
+}
+
 /// Format a VerboseError into a human-readable message with line/column info,
 /// source context, and a caret pointing at the error position.
 fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) -> String {
@@ -1785,9 +1836,23 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
 
     // Find the deepest (most specific) error position — prefer the context
     // that consumed the most input (i.e. smallest remaining fragment).
+    // When multiple contexts have the same position, prefer the last one
+    // (outermost wrapper, which is typically more descriptive), unless
+    // it's the generic "expression" context.
     let (err_input, kind) = err.errors.iter()
         .filter(|(_, k)| matches!(k, VerboseErrorKind::Context(_)))
-        .min_by_key(|(i, _)| i.fragment.len())
+        .min_by(|(a, ka), (b, kb)| {
+            a.fragment.len().cmp(&b.fragment.len()).then_with(|| {
+                // At the same position, prefer non-"expression" contexts
+                let a_generic = matches!(ka, VerboseErrorKind::Context("expression"));
+                let b_generic = matches!(kb, VerboseErrorKind::Context("expression"));
+                match (a_generic, b_generic) {
+                    (true, false) => core::cmp::Ordering::Greater,
+                    (false, true) => core::cmp::Ordering::Less,
+                    _ => core::cmp::Ordering::Greater, // prefer later (outermost)
+                }
+            })
+        })
         .or_else(|| err.errors.iter().min_by_key(|(i, _)| i.fragment.len()))
         .unwrap_or(&err.errors[0]);
 
@@ -1806,13 +1871,24 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
     let caret_offset = col - 1;
     let caret = format!("{}^---", " ".repeat(caret_offset));
 
-    // Use the most specific context label (the one that consumed the most input)
+    // Use the most specific context label (the one that consumed the most input).
+    // When tied, prefer non-"expression" contexts, then prefer the last (outermost).
     let best_context = err.errors.iter()
         .filter_map(|(i, k)| match k {
             VerboseErrorKind::Context(ctx) => Some((i.fragment.len(), *ctx)),
             _ => None,
         })
-        .min_by_key(|(len, _)| *len)
+        .min_by(|(a_len, a_ctx), (b_len, b_ctx)| {
+            a_len.cmp(b_len).then_with(|| {
+                let a_generic = *a_ctx == "expression";
+                let b_generic = *b_ctx == "expression";
+                match (a_generic, b_generic) {
+                    (true, false) => core::cmp::Ordering::Greater,
+                    (false, true) => core::cmp::Ordering::Less,
+                    _ => core::cmp::Ordering::Greater,
+                }
+            })
+        })
         .map(|(_, ctx)| ctx);
 
     let line_num_width = format!("{}", line).len();
@@ -1823,7 +1899,18 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
         line, col, padding, line, source_line, padding, caret, padding
     );
 
-    if let Some(ctx) = best_context {
+    // Try to produce a better message than just "expected expression"
+    let hint = if best_context == Some("expression") {
+        diagnose_atom_failure(err_input.fragment)
+    } else if best_context == Some("variable name in `let` binding") {
+        diagnose_bad_label(err_input.fragment, "variable name in `let` binding")
+    } else {
+        None
+    };
+
+    if let Some(hint) = hint {
+        msg.push_str(&format!("\n{} = {}", padding, hint));
+    } else if let Some(ctx) = best_context {
         if ctx.starts_with(|c: char| c.is_uppercase()) {
             msg.push_str(&format!("\n{} = {}", padding, ctx));
         } else {
@@ -1840,6 +1927,176 @@ fn format_verbose_error(input: &str, err: &nom::error::VerboseError<Input<'_>>) 
     }
 
     msg
+}
+
+/// When `nonreserved_label` fails, explain why the identifier is rejected.
+fn diagnose_bad_label(at: &str, context_msg: &str) -> Option<String> {
+    // Extract the identifier at the error position
+    let word: String = at.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '/').collect();
+    if word.is_empty() {
+        return None;
+    }
+    if RESERVED.contains(&word.as_str()) {
+        Some(format!("`{}` is a reserved keyword and cannot be used as a {}", word, context_msg))
+    } else if is_builtin_name(&word) {
+        Some(format!("`{}` is a builtin and cannot be used as a {}", word, context_msg))
+    } else {
+        None
+    }
+}
+
+/// When the parser fails at the atom level ("expected expression"), try to
+/// diagnose the specific problem from the input text.
+fn diagnose_atom_failure(at: &str) -> Option<String> {
+    let trimmed = at.trim_start();
+
+    // [] without type annotation
+    if trimmed.starts_with("[]") {
+        return Some("empty list requires a type annotation: `[] : List T`".into());
+    }
+
+    // Keywords used bare (without required arguments/structure)
+    for (kw, hint) in &[
+        ("merge", "`merge` requires at least two arguments: `merge handler union`"),
+        ("Some", "`Some` requires an argument: `Some value`"),
+        ("toMap", "`toMap` requires an argument: `toMap record`"),
+        ("assert", "`assert` requires a type annotation: `assert : expr`"),
+    ] {
+        if trimmed.starts_with(kw) {
+            let rest = &trimmed[kw.len()..];
+            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '/') {
+                return Some((*hint).into());
+            }
+        }
+    }
+
+    // Keywords that require whitespace before `(`
+    for (kw, name) in &[
+        ("if", "if"),
+        ("forall", "forall"),
+    ] {
+        if trimmed.starts_with(kw) {
+            let rest = &trimmed[kw.len()..];
+            if rest.starts_with('(') {
+                return Some(format!("`{}` requires a space before `(` (e.g. `{} (x)`)", name, name));
+            }
+        }
+    }
+
+    // Lambda without space
+    if trimmed.starts_with('\\') || trimmed.starts_with('λ') {
+        let rest = if trimmed.starts_with('\\') { &trimmed[1..] } else { &trimmed['λ'.len_utf8()..] };
+        if rest.starts_with('(') {
+            return Some("`λ`/`\\` requires a space before `(` (e.g. `\\(x : T) -> x`)".into());
+        }
+    }
+
+    // Some(x) without space
+    if trimmed.starts_with("Some(") {
+        return Some("`Some` requires a space before its argument: `Some (x)` not `Some(x)`".into());
+    }
+
+    // merge(x) without space
+    if trimmed.starts_with("merge(") {
+        return Some("`merge` requires a space before its arguments: `merge handler union`".into());
+    }
+
+    // Keyword used as record field
+    for kw in RESERVED {
+        if trimmed.starts_with('{') {
+            // Already inside record — check if the error is at a keyword position
+            // This is handled by the record parser, not here
+        }
+        if trimmed.starts_with(kw) {
+            let rest = &trimmed[kw.len()..];
+            if rest.starts_with(':') || rest.starts_with(' ') && rest.trim_start().starts_with(':') {
+                return Some(format!("`{}` is a reserved keyword and cannot be used as a field name; use backticks: `` `{}` ``", kw, kw));
+            }
+        }
+    }
+
+    // Leading zeros in natural
+    if trimmed.starts_with('0') && trimmed.len() > 1 {
+        let second = trimmed.as_bytes().get(1).copied();
+        if second.map_or(false, |b| b.is_ascii_digit()) {
+            return Some("natural literals cannot have leading zeros (use `0x` prefix for hexadecimal)".into());
+        }
+    }
+
+    // Builtin with de Bruijn index
+    for name in &["True", "False", "Type", "Kind", "Sort",
+                   "Bool", "Natural", "Integer", "Double", "Text",
+                   "List", "Optional", "None"] {
+        if trimmed.starts_with(name) {
+            let rest = &trimmed[name.len()..];
+            if rest.starts_with('@') {
+                return Some(format!("`{}` is a builtin and cannot have a de Bruijn index (`@`)", name));
+            }
+        }
+    }
+
+    // Double out of bounds
+    if trimmed.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+') {
+        if trimmed.contains('.') || trimmed.contains('e') || trimmed.contains('E') {
+            return Some("double literal is out of the representable range".into());
+        }
+    }
+
+    // { with keyword field
+    if trimmed.starts_with('{') {
+        let inner = trimmed[1..].trim_start();
+        // Check for leading comma
+        let inner = if inner.starts_with(',') { inner[1..].trim_start() } else { inner };
+        for kw in RESERVED {
+            if inner.starts_with(kw) {
+                let after_kw = &inner[kw.len()..];
+                if after_kw.starts_with(|c: char| c == ':' || c == '=' || c == ',' || c == '}' || c.is_whitespace()) {
+                    return Some(format!("`{}` is a reserved keyword and cannot be used as a record field name; use backticks: `\\`{}\\``", kw, kw));
+                }
+            }
+        }
+    }
+
+    // < with duplicate separator
+    if trimmed.starts_with('<') {
+        let inner = trimmed[1..].trim_start();
+        if inner.starts_with("||") || inner.starts_with("| |") {
+            return Some("unexpected `|` in union type".into());
+        }
+    }
+
+    // [ or { with duplicate comma
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        let inner = trimmed[1..].trim_start();
+        let inner = if inner.starts_with(',') { inner[1..].trim_start() } else { inner };
+        if inner.starts_with(',') {
+            return Some("unexpected `,` — duplicate commas are not allowed".into());
+        }
+    }
+
+    // Old union literal syntax: < x = 3 | ... >
+    if trimmed.starts_with('<') {
+        let inner = trimmed[1..].trim_start();
+        // Skip leading |
+        let inner = if inner.starts_with('|') { inner[1..].trim_start() } else { inner };
+        // Look for `label = expr` pattern
+        if let Some(eq_pos) = inner.find('=') {
+            let before_eq = inner[..eq_pos].trim();
+            if !before_eq.is_empty() && before_eq.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '/') {
+                return Some("union literal syntax `< x = value >` is no longer supported; use `(< X : T | ... >).X value` instead".into());
+            }
+        }
+    }
+
+    // `let assert = ...` — assert is a keyword
+    if trimmed.starts_with("let") {
+        let rest = trimmed[3..].trim_start();
+        if rest.starts_with("assert") {
+            return Some("`assert` is a reserved keyword and cannot be used as a variable name".into());
+        }
+    }
+
+    None
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

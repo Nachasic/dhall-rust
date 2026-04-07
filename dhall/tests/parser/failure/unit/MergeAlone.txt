@@ -1,6 +1,6 @@
- --> 1:1
+ --> 2:1
   |
-1 | merge
+2 | 
   | ^---
   |
-  = expected expression
+  = expected first argument to `merge`

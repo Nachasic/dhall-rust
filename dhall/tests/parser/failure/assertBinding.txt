@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:5
   |
 1 | let assert = 2 in 1
-  | ^---
+  |     ^---
   |
-  = expected expression
+  = `assert` is a reserved keyword and cannot be used as a variable name in `let` binding

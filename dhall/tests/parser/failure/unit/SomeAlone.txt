@@ -1,6 +1,6 @@
- --> 1:1
+ --> 2:1
   |
-1 | Some
+2 | 
   | ^---
   |
-  = expected expression
+  = expected argument to `Some`

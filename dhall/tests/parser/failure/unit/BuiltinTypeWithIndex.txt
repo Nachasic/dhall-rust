@@ -3,4 +3,4 @@
 1 | Type@0
   | ^---
   |
-  = expected expression
+  = `Type` is a builtin and cannot have a de Bruijn index (`@`)

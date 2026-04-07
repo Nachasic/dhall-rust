@@ -3,4 +3,4 @@
 1 | 042
   | ^---
   |
-  = expected expression
+  = natural literals cannot have leading zeros (use `0x` prefix for hexadecimal)

@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:11
   |
 1 | forall(x :T) -> x
-  | ^---
+  |           ^---
   |
-  = expected expression
+  = expected whitespace after `:` in `forall`

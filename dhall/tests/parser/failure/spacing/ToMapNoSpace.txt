@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:6
   |
 1 | toMap(x)
-  | ^---
+  |      ^---
   |
-  = expected expression
+  = expected whitespace after `toMap`

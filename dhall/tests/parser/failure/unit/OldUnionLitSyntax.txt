@@ -3,4 +3,4 @@
 1 | < x = 3 | y : Bool >
   | ^---
   |
-  = expected expression
+  = union literal syntax `< x = value >` is no longer supported; use `(< X : T | ... >).X value` instead

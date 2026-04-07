@@ -3,4 +3,4 @@
 1 | Bool@2
   | ^---
   |
-  = expected expression
+  = `Bool` is a builtin and cannot have a de Bruijn index (`@`)

@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:6
   |
 1 | \(x :T) -> x
-  | ^---
+  |      ^---
   |
-  = expected expression
+  = expected whitespace after `:` in lambda

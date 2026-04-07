@@ -3,4 +3,4 @@
 1 | { let: Text }
   | ^---
   |
-  = expected expression
+  = `let` is a reserved keyword and cannot be used as a record field name; use backticks: `\`let\``

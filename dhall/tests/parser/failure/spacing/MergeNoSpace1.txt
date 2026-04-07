@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:6
   |
 1 | merge(x) y
-  | ^---
+  |      ^---
   |
-  = expected expression
+  = expected whitespace after `merge`

@@ -1,6 +1,6 @@
- --> 1:1
+ --> 1:13
   |
 1 | let x = y in(e)
-  | ^---
+  |             ^---
   |
-  = expected expression
+  = expected whitespace after `in`
