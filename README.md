@@ -1,23 +1,5 @@
 <img src="https://github.com/dhall-lang/dhall-lang/blob/master/img/dhall-logo.svg" width="600" alt="Dhall Logo">
 
-[![crates.io][cratesio-badge]][cratesio-url]
-[![documentation][docs-badge]][docs-url]
-[![CI status][ci-badge]][ci-url]
-[![coverage status][codecov-badge]][codecov-url]
-[![dependency status][depsrs-badge]][depsrs-url]
-
-[cratesio-badge]: https://img.shields.io/crates/v/serde_dhall.svg?style=flat-square
-[docs-badge]: https://img.shields.io/badge/docs-latest-blue.svg?style=flat-square
-[ci-badge]: https://img.shields.io/github/workflow/status/Nadrieril/dhall-rust/Test%20suite?style=flat-square
-[codecov-badge]: https://img.shields.io/codecov/c/github/Nadrieril/dhall-rust?style=flat-square
-[depsrs-badge]: https://deps.rs/repo/github/nadrieril/dhall-rust/status.svg
-
-[cratesio-url]: https://crates.io/crates/serde_dhall
-[docs-url]: https://docs.rs/serde_dhall
-[ci-url]: https://github.com/Nadrieril/dhall-rust/actions
-[codecov-url]: https://codecov.io/gh/Nadrieril/dhall-rust
-[depsrs-url]: https://deps.rs/repo/github/nadrieril/dhall-rust
-
 Dhall is a programmable configuration language optimized for
 maintainability.
 
@@ -33,7 +15,10 @@ You can find more details about the language by visiting the official website:
 
 # STATUS
 
-I am no longer maintaining this project. I got it to support about 90% of the language but then lost faith in the usability of dhall for my purposes. I am willing to hand this over to someone who's excited about dhall and rust.
+This is an experimental fork of [Nadrieril/dhall-rust](https://github.com/Nadrieril/dhall-rust),
+not production-ready. The goal is to experiment with customizable Dhall
+runtimes — pluggable import resolution, custom builtin functions, and a
+`no_std`-compatible core.
 
 # `dhall-rust`
 
@@ -44,10 +29,14 @@ If you only want to convert Dhall to/from JSON or YAML, you should use the
 official tooling instead; instructions can be found
 [here](https://docs.dhall-lang.org/tutorials/Getting-started_Generate-JSON-or-YAML.html).
 
-## Usage
+## Usage (at your own risk)
 
-For now, the only supported way of integrating Dhall in your application is via
-the `serde_dhall` crate, and only parsing is supported.
+There are two ways to integrate Dhall in your application:
+
+- **`serde_dhall`** — for straightforward deserialization of Dhall values into Rust types via serde.
+- **`dhall_engine`** — for programmatic control: custom builtin functions, pluggable import resolution, and lazy evaluation.
+
+### `serde_dhall`
 
 Add this to your `Cargo.toml`:
 
@@ -72,6 +61,37 @@ expected_map.insert("x".to_string(), 1);
 expected_map.insert("y".to_string(), 2);
 
 assert_eq!(deserialized_map, expected_map);
+```
+
+### `dhall_engine`
+
+Add this to your `Cargo.toml`:
+
+```toml
+[dependencies]
+dhall_engine = { git = "https://github.com/Nachasic/dhall-rust" }
+```
+
+Register custom builtins that participate in typechecking and normalization:
+
+```rust
+use dhall_engine::{types::*, Engine};
+
+struct DoubleNat;
+
+impl<'cx> CustomBuiltinHandler<'cx> for DoubleNat {
+    fn call(&self, args: &[Nir<'cx>], _cx: Ctxt<'cx>) -> Option<Nir<'cx>> {
+        if args.len() != 1 { return None; }
+        let n = u64::from_nir(&args[0])?;
+        Some((n * 2).into_nir())
+    }
+}
+
+let engine = Engine::new()
+    .with_builtin("doubleNat", "Natural -> Natural", DoubleNat);
+
+let result = engine.eval_str("doubleNat 21").unwrap();
+assert_eq!(result.to_string(), "42");
 ```
 
 `dhall` requires Rust >= 1.76.0
