@@ -1,10 +1,11 @@
 [package]
 name = "dhall_engine"
 version = "0.1.0"
+authors = ["Alex Culliere <nachasic@gmail.com>"]
 edition = "2021"
 description = "Extensible evaluation engine for the Dhall configuration language"
 license = "BSD-2-Clause"
-repository = "https://github.com/Nadrieril/dhall-rust"
+repository = "https://github.com/Nachasic/dhall-rust"
 
 [features]
 default = ["std", "reqwest"]

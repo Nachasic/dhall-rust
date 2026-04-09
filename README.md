@@ -17,7 +17,7 @@ You can find more details about the language by visiting the official website:
 
 This is an experimental fork of [Nadrieril/dhall-rust](https://github.com/Nadrieril/dhall-rust),
 not production-ready. The goal is to experiment with customizable Dhall
-runtimes — pluggable import resolution, custom builtin functions, and a
+runtimes: pluggable import resolution, custom builtin functions, and a
 `no_std`-compatible core.
 
 # `dhall-rust`
@@ -33,8 +33,8 @@ official tooling instead; instructions can be found
 
 There are two ways to integrate Dhall in your application:
 
-- **`serde_dhall`** — for straightforward deserialization of Dhall values into Rust types via serde.
-- **`dhall_engine`** — for programmatic control: custom builtin functions, pluggable import resolution, and lazy evaluation.
+- **`serde_dhall`** for straightforward deserialization of Dhall values into Rust types via serde.
+- **`dhall_engine`** for programmatic control: custom builtin functions, pluggable import resolution, and lazy evaluation.
 
 ### `serde_dhall`
 

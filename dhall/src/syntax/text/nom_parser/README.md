@@ -2,6 +2,12 @@
 
 A hand-written recursive-descent parser for the [Dhall configuration language](https://dhall-lang.org), built on the [`nom`](https://docs.rs/nom) parser combinator library. It implements the [Dhall ABNF grammar](https://github.com/dhall-lang/dhall-lang/blob/master/standard/dhall.abnf) and passes all 1937 specification tests.
 
+## LLM usage disclosure
+
+Code of this parser was generated with help of Claude Sonnet, through multiple iterations, with careful architectural oversight, review and hand-written adjustments from a human maintainer. LLM assistance was used to create the basic structure of the parser as well as making it compliant with the Dhall language specification. The extensive test suite created by the original maintainers of `dhall-rust` was used as an integral part of parser development and assessment.
+
+In accordance with the "human-in-the-loop" model, the code of this parser inherits the original BSD-2 licence
+
 ## Module Structure
 
 The parser is split into focused modules that follow the grammar bottom-up:
