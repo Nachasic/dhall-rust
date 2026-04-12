@@ -218,9 +218,38 @@ pub(super) fn expression(input: Input<'_>) -> ParseResult<'_, Expr> {
     )))(input)
 }
 
+/// Compute 1-based line and column from the text before a given position.
+fn line_col(before: &str) -> (usize, usize) {
+    let line = before.chars().filter(|&c| c == '\n').count() + 1;
+    let col_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = before[col_start..].chars().count() + 1;
+    (line, col)
+}
+
+/// Format a rustc-style snippet pointing at `offset` in `input` with a hint message.
+fn format_leftover_error(input: &str, offset: usize, hint: &str) -> String {
+    let before = &input[..offset];
+    let (line, col) = line_col(before);
+
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = input[offset..].find('\n').map(|i| offset + i).unwrap_or(input.len());
+    let source_line = &input[line_start..line_end];
+
+    let caret = format!("{}^---", " ".repeat(col - 1));
+    let pad = " ".repeat(format!("{}", line).len());
+
+    format!(
+        " --> {line}:{col}\n\
+         {pad} |\n\
+         {line} | {source_line}\n\
+         {pad} | {caret}\n\
+         {pad} |\n\
+         {pad} = {hint}"
+    )
+}
+
 /// Entry point: parse a complete Dhall expression.
 pub fn parse_expr(input: &str) -> Result<Expr, String> {
-    // Skip shebang lines if present.
     let mut input = input;
     while input.starts_with("#!") {
         input = input.find('\n').map_or("", |i| &input[i + 1..]);
@@ -233,26 +262,9 @@ pub fn parse_expr(input: &str) -> Result<Expr, String> {
         Ok((rest, _)) => {
             let consumed = input.len() - rest.len();
             let before = &input[..consumed];
-            let line = before.chars().filter(|&c| c == '\n').count() + 1;
-            let last_nl = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let col = before[last_nl..].chars().count() + 1;
-
-            let line_start = last_nl;
-            let line_end = input[consumed..].find('\n').map(|i| consumed + i).unwrap_or(input.len());
-            let source_line = &input[line_start..line_end];
-            let caret_offset = col - 1;
-            let caret = format!("{}^---", " ".repeat(caret_offset));
-            let line_num_width = format!("{}", line).len();
-            let padding = " ".repeat(line_num_width);
-
-            let remaining = rest.fragment;
             let had_leading_ws = consumed > 0 && input.as_bytes()[consumed - 1].is_ascii_whitespace();
-            let hint = diagnose_leftover(remaining, had_leading_ws, before);
-
-            Err(format!(
-                " --> {}:{}\n{} |\n{} | {}\n{} | {}\n{} |\n{} = {}",
-                line, col, padding, line, source_line, padding, caret, padding, padding, hint
-            ))
+            let hint = diagnose_leftover(rest.fragment, had_leading_ws, before);
+            Err(format_leftover_error(input, consumed, &hint))
         }
         Err(e) => {
             let e = match e {
